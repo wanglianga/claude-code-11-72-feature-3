@@ -48,8 +48,48 @@ export const BOUNDARY_LABEL: Record<string, string> = {
   CALIBRATION: '校准生效',
   STATE: '状态切换',
   INSTRUMENT_SWAP: '设备交接',
+  STANDARD_CHANGE: '限值调整',
   GAP: '采样空档端点',
 };
+
+export const EVENT_STATUS_LABEL: Record<string, string> = {
+  CLOSED: '已闭合',
+  OPEN_BOUNDARY: '开放：边界未回落',
+  OPEN_END_OF_WINDOW: '开放：跨自然日',
+  OPEN_DATA_GAP: '开放：证据中断',
+  OPEN_LIMIT_CHANGE: '切开：限值调整',
+};
+
+export function eventStatusBadge(status: string): { cls: string; label: string } {
+  if (status === 'CLOSED') return { cls: 'ok', label: EVENT_STATUS_LABEL.CLOSED };
+  if (status === 'OPEN_LIMIT_CHANGE') return { cls: 'info', label: EVENT_STATUS_LABEL.OPEN_LIMIT_CHANGE };
+  return { cls: 'warn', label: EVENT_STATUS_LABEL[status] ?? status };
+}
+
+export const EVIDENCE_KIND_LABEL: Record<string, string> = {
+  MEASURED: '实测',
+  INTERPOLATED: '插值',
+  GAP_UNKNOWN: '未知空档',
+  UNMODELLED: '未建模',
+};
+
+export const EVENT_BOUNDARY_LABEL: Record<string, string> = {
+  CROSS_UP: '上穿限值',
+  CROSS_DOWN: '下穿限值',
+  STATE_CUT: '状态切断',
+  GAP_START: '空档开始',
+  GAP_END: '空档结束',
+  LIMIT_CHANGE: '限值调整',
+  INSTRUMENT_SWAP: '仪表交接',
+  WINDOW_END: '窗口终点',
+  CENSOR_START: '边界/截断',
+};
+
+/** 标准依据的简称（用于提示） */
+export function STANDARD_LABEL(key: string): string {
+  if (key === 'GB18918') return '《城镇污水处理厂污染物排放标准》GB 18918-2002';
+  return key;
+}
 
 export function shortTime(ms: number): string {
   return fmtDateTime(ms).slice(11);

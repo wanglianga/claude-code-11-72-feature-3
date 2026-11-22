@@ -22,6 +22,8 @@ import {
   ScopeOptions,
   SegmentBoundary,
   SegmentCategory,
+  StandardConflict,
+  StandardWindow,
   StatePeriod,
 } from './types';
 import {
@@ -41,6 +43,7 @@ import {
 } from './weave';
 import { EPS, intersectIntervals, Iv, mergeIntervals } from './stats';
 import { dayEndMs, dayStartMs } from './time';
+import { buildStandardContext, limitChangeTimes } from './standards';
 
 export type PieceState = 'OK' | 'FLUSH' | 'CALIB' | 'BYPASS' | 'FAULT' | null;
 
@@ -97,6 +100,9 @@ export interface DayContext {
   windowFrom: number;
   windowTo: number;
   standards: Record<Pollutant, number>;
+  /** 按标准生效边界切开的限值窗口（窗口内限值唯一） */
+  standardWindows: Record<Pollutant, StandardWindow[]>;
+  standardConflicts: StandardConflict[];
   pieces: Map<Pollutant, Piece[]>;
   readingsByInstrument: Map<string, Reading[]>;
 }
@@ -120,17 +126,24 @@ export function makeDayContext(
   );
   const readingsByInstrument = new Map<string, Reading[]>();
   for (const [id, list] of index.byInstrument) readingsByInstrument.set(id, [...list].sort(sortReadings));
+  const fallback = {
+    COD: plant?.dischargeStandard.COD ?? 50,
+    NH3N: plant?.dischargeStandard.NH3N ?? 5,
+  } as Record<Pollutant, number>;
+  const windowFrom = dayStartMs(day);
+  const windowTo = dayEndMs(day);
+  const codStd = buildStandardContext(dataset, pointCode, 'COD', windowFrom, windowTo, fallback.COD);
+  const nh3nStd = buildStandardContext(dataset, pointCode, 'NH3N', windowFrom, windowTo, fallback.NH3N);
   const ctx: DayContext = {
     dataset,
     index,
     point,
     scope,
-    windowFrom: dayStartMs(day),
-    windowTo: dayEndMs(day),
-    standards: {
-      COD: plant?.dischargeStandard.COD ?? 50,
-      NH3N: plant?.dischargeStandard.NH3N ?? 5,
-    },
+    windowFrom,
+    windowTo,
+    standards: fallback,
+    standardWindows: { COD: codStd.windows, NH3N: nh3nStd.windows },
+    standardConflicts: [...codStd.conflicts, ...nh3nStd.conflicts],
     pieces: new Map(),
     readingsByInstrument,
   };
@@ -144,8 +157,7 @@ function buildSeries(
   instrument: Instrument,
   calibration: Calibration | null,
   run: Iv,
-): Series {
-  const [a, b] = run;
+): Series {  const [a, b] = run;
   const hold = edgeHoldMs(instrument);
   const gapMs = gapThresholdMs(instrument);
   const all = ctx.readingsByInstrument.get(instrument.instrumentId) ?? [];
@@ -258,6 +270,15 @@ export function buildPieces(ctx: DayContext, pollutant: Pollutant): Piece[] {
     { includeSuspect: ctx.scope.includeSuspect },
   );
   const weave = weaveBoundaries(concCtx, flowCtx, ctx.index, ctx.windowFrom, ctx.windowTo);
+  const limitCuts = limitChangeTimes(ctx.standardWindows[pollutant], ctx.windowFrom, ctx.windowTo);
+  for (const at of limitCuts) {
+    weave.boundaries.push({
+      at,
+      kind: 'STANDARD_CHANGE',
+      refId: ctx.standardWindows[pollutant].find((w) => w.from === at)?.standardId ?? null,
+      label: '标准限值调整（事件必须切开）',
+    });
+  }
   const times = new Set<number>([ctx.windowFrom, ctx.windowTo]);
   for (const b of weave.boundaries) times.add(b.at);
   const sorted = [...times].sort((x, y) => x - y);

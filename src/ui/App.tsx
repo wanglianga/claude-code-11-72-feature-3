@@ -11,12 +11,20 @@ import { IntakePage } from './pages/IntakePage';
 import { InstrumentPage } from './pages/InstrumentPage';
 import { MethodPage } from './pages/MethodPage';
 import { MonthPage } from './pages/MonthPage';
+import { EventsPage } from './pages/EventsPage';
+import { StandardsPage } from './pages/StandardsPage';
+import { DerivationPage } from './pages/DerivationPage';
+import { DispositionsPage } from './pages/DispositionsPage';
+import { ReportPage } from './pages/ReportPage';
 import { METHOD_LABEL, fmtNum } from './format';
 
 const NAV: { key: string; label: string; group: string }[] = [
   { key: 'overview', label: '概览', group: '复核' },
   { key: 'hierarchy', label: '层级查询', group: '复核' },
   { key: 'trace', label: '片段与来源链', group: '复核' },
+  { key: 'events', label: '事件时间线', group: '事件' },
+  { key: 'evidence', label: '证据分段', group: '事件' },
+  { key: 'derivation', label: '派生影响', group: '事件' },
   { key: 'quality', label: '覆盖与资格', group: '合规' },
   { key: 'month', label: '月度汇总', group: '合规' },
   { key: 'recalc', label: '复算候选', group: '合规' },
@@ -24,6 +32,9 @@ const NAV: { key: string; label: string; group: string }[] = [
   { key: 'intake', label: '接入账', group: '资料' },
   { key: 'instruments', label: '设备履历', group: '资料' },
   { key: 'method', label: '方法说明', group: '资料' },
+  { key: 'standards', label: '标准适用库', group: '法规' },
+  { key: 'dispositions', label: '处置关联簿', group: '法规' },
+  { key: 'report', label: '申报核对', group: '申报' },
 ];
 
 export function App() {
@@ -63,6 +74,12 @@ export function App() {
                 )}
                 {n.key === 'quality' && state.declarations.length > 0 && (
                   <span className="nav-badge">{state.declarations.length}</span>
+                )}
+                {n.key === 'events' && state.eventSummary && state.eventSummary.events.length > 0 && (
+                  <span className="nav-badge">{state.eventSummary.events.length}</span>
+                )}
+                {n.key === 'report' && state.eventDrafts.some((d) => d.status === 'NEEDS_RECHECK') && (
+                  <span className="nav-badge">{state.eventDrafts.filter((d) => d.status === 'NEEDS_RECHECK').length}</span>
                 )}
               </button>
             ))}
@@ -160,6 +177,12 @@ export function App() {
           {state.ready && page === 'instruments' && <InstrumentPage state={state} actions={actions} />}
           {state.ready && page === 'method' && <MethodPage state={state} />}
           {state.ready && page === 'month' && <MonthPage state={state} actions={actions} />}
+          {state.ready && page === 'events' && <EventsPage state={state} actions={actions} />}
+          {state.ready && page === 'evidence' && <EventsPage state={state} actions={actions} initialTab="evidence" />}
+          {state.ready && page === 'derivation' && <DerivationPage state={state} actions={actions} />}
+          {state.ready && page === 'standards' && <StandardsPage state={state} actions={actions} />}
+          {state.ready && page === 'dispositions' && <DispositionsPage state={state} actions={actions} />}
+          {state.ready && page === 'report' && <ReportPage state={state} actions={actions} />}
         </div>
       </main>
 

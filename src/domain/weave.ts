@@ -244,6 +244,7 @@ export type BoundaryKind =
   | 'CALIBRATION'
   | 'STATE'
   | 'INSTRUMENT_SWAP'
+  | 'STANDARD_CHANGE'
   | 'GAP';
 
 export interface BoundaryPoint {

@@ -10,13 +10,15 @@ import {
   mergeDataset,
   parseBindings,
   parseCalibrations,
+  parseDispositions,
   parseInstruments,
   parsePlants,
   parsePoints,
   parseReadings,
+  parseStandards,
   parseStates,
 } from '../src/sample/ingest';
-import type { Dataset, Reading, SampleManifest } from '../src/domain/types';
+import type { Dataset, DispositionRecord, Reading, SampleManifest } from '../src/domain/types';
 
 export function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -25,6 +27,7 @@ export function sha256File(path: string): string {
 export function parseSampleFromDisk(dir: string, manifest: SampleManifest): {
   baseDataset: Dataset;
   lateReadings: Reading[];
+  lateDispositions: DispositionRecord[];
   fingerprints: { fileName: string; expected: string; actual: string; ok: boolean }[];
 } {
   let dataset: Dataset = {
@@ -36,6 +39,8 @@ export function parseSampleFromDisk(dir: string, manifest: SampleManifest): {
     bindings: [],
     readings: [],
     files: [],
+    standards: [],
+    dispositions: [],
   };
   const fingerprints: { fileName: string; expected: string; actual: string; ok: boolean }[] = [];
   const read = (name: string) => readFileSync(resolve(dir, name), 'utf8');
@@ -80,6 +85,12 @@ export function parseSampleFromDisk(dir: string, manifest: SampleManifest): {
     } else if (meta.kind === 'STATE_LOG') {
       const p = parseStates(text);
       dataset = mergeDataset(dataset, { states: p.states, files: [file] });
+    } else if (meta.kind === 'STANDARD_REGISTER') {
+      const p = parseStandards(text, fileId);
+      dataset = mergeDataset(dataset, { standards: p.standards, files: [file] });
+    } else if (meta.kind === 'DISPOSITION_REGISTER') {
+      const p = parseDispositions(text, fileId);
+      dataset = mergeDataset(dataset, { dispositions: p.dispositions, files: [file] });
     }
   }
   for (const meta of manifest.baseFiles.filter((f) => f.kind === 'READINGS')) {
@@ -122,5 +133,14 @@ export function parseSampleFromDisk(dir: string, manifest: SampleManifest): {
     dataset.bindings,
     { lateMode: true },
   );
-  return { baseDataset: dataset, lateReadings: lateParsed.readings, fingerprints };
+  let lateDispositions: DispositionRecord[] = [];
+  if (manifest.lateDispositionFile) {
+    const ldMeta = manifest.lateDispositionFile;
+    const ldText = read(ldMeta.fileName);
+    const ldActual = sha(ldMeta.fileName);
+    fingerprints.push({ fileName: ldMeta.fileName, expected: ldMeta.sha256, actual: ldActual, ok: ldActual === ldMeta.sha256 });
+    const parsed = parseDispositions(ldText, `file:${ldMeta.fileName}:${ldActual.slice(0, 16)}`);
+    lateDispositions = parsed.dispositions;
+  }
+  return { baseDataset: dataset, lateReadings: lateParsed.readings, lateDispositions, fingerprints };
 }

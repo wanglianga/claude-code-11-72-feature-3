@@ -50,6 +50,87 @@ export interface Plant {
   dischargeStandard: { COD: number; NH3N: number };
 }
 
+/* ------------------------------------------------------------------ *
+ * 标准适用库：排口 × 因子 × 时段 × 限值生效日期
+ * 限值不在代码里写死；任何中途调整都必须在标准库形成新版本，
+ * 事件与阈值穿越都按限值窗口分别判定，绝不用一个常数覆盖全天。
+ * ------------------------------------------------------------------ */
+
+export interface StandardRule {
+  standardId: string;
+  pointCode: string;
+  pollutant: Pollutant;
+  /** 排放限值 mg/L */
+  limitValue: number;
+  /** 生效时刻（含），对齐时间轴 */
+  effectiveFrom: number;
+  /** 失效时刻（不含）；null 表示持续有效 */
+  effectiveTo: number | null;
+  /** 标准依据，例如《城镇污水处理厂污染物排放标准》 */
+  basis: string;
+  /** 等级/类别，例如 一级A、地方加严值 */
+  grade: string;
+  issuedBy: string;
+  note: string;
+  /** 录入/调整时刻：同起点多规则时作为确定性裁决依据 */
+  createdAt: number;
+  sourceFileId?: string;
+}
+
+/** 标准窗口：一天内按生效边界切开的单一限值区间 */
+export interface StandardWindow {
+  standardId: string;
+  pollutant: Pollutant;
+  limit: number;
+  from: number;
+  to: number;
+  basis: string;
+  grade: string;
+  /** 同一窗口内被裁决掉的其他规则（多个标准同时适用时） */
+  conflictIds: string[];
+}
+
+export interface StandardConflict {
+  at: number;
+  pollutant: Pollutant;
+  ruleIds: string[];
+  resolvedTo: string;
+  reason: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 处置关联簿：加药、旁路、维护、清洗记录。
+ * 只登记“时间上落在事件附近”的记录，causalClaim 恒为 false：
+ * 同现不等于因果，处置记录不能直接宣判事件消失。
+ * ------------------------------------------------------------------ */
+
+export type DispositionKind = 'DOSING' | 'BYPASS' | 'MAINTENANCE' | 'CLEANING' | 'OTHER';
+
+export const DISPOSITION_LABELS: Record<DispositionKind, string> = {
+  DOSING: '加药',
+  BYPASS: '旁路',
+  MAINTENANCE: '维护',
+  CLEANING: '清洗',
+  OTHER: '其他',
+};
+
+export interface DispositionRecord {
+  dispositionId: string;
+  pointCode: string;
+  /** 针对的因子；ANY 表示不限因子 */
+  pollutant: Pollutant | 'ANY';
+  kind: DispositionKind;
+  from: number;
+  to: number;
+  /** 平台接收时刻：晚于申报截止即为迟到 */
+  receivedAt: number;
+  recordedBy: string;
+  summary: string;
+  workOrder: string;
+  sourceFileId: string;
+  note: string;
+}
+
 export interface OutfallPoint {
   pointCode: string;
   plantId: string;
@@ -151,6 +232,8 @@ export type FileKind =
   | 'BINDING_REGISTER'
   | 'CALIBRATION_REGISTER'
   | 'STATE_LOG'
+  | 'STANDARD_REGISTER'
+  | 'DISPOSITION_REGISTER'
   | 'READINGS'
   | 'LATE_BATCH';
 
@@ -180,13 +263,362 @@ export interface LoadBounds {
   max: number;
 }
 
-export interface ExceedanceInterval {
+export type ExceedanceInterval = {
   from: number;
   to: number;
   seconds: number;
   peak: number;
   peakAt: number;
+  /** 该段所适用的限值（标准中途调整时不同段不同） */
+  limit?: number;
+};
+
+/* ------------------------------------------------------------------ *
+ * 事件推导：超标事件不是“某一行读数大于阈值”，而是
+ *   有效浓度片段 × 标准窗口 × 状态边界 × 间隔证据 共同推出的时间区间。
+ * 同一套规则同时服务于两种派生策略：
+ *   PERSIST_SNAPSHOT  读数到达即物化带来源索引的事件片段（快，但补传/限值调整会成批失效）
+ *   DERIVE_ON_DEMAND  只持久化原始有效片段与法规条件，查询时推导（修订影响小，计算移到查询端）
+ * 两者必须对同一冻结输入给出同一事件集合；缓存过旧不得替代当前证据。
+ * ------------------------------------------------------------------ */
+
+export type DerivationStrategy = 'PERSIST_SNAPSHOT' | 'DERIVE_ON_DEMAND';
+
+export const STRATEGY_LABELS: Record<DerivationStrategy, string> = {
+  PERSIST_SNAPSHOT: '读数到达即物化（缓存）',
+  DERIVE_ON_DEMAND: '查询时推导（按需）',
+};
+
+export type EventKind = 'EXCEEDANCE' | 'DATA_GAP';
+
+export type EventStatus =
+  | 'CLOSED'
+  /** 边界读数恰在限值上/下、无法根本判定何时停止 */
+  | 'OPEN_BOUNDARY'
+  /** 自然日窗口结束时仍在限值之上 */
+  | 'OPEN_END_OF_WINDOW'
+  /** 断在清洗/校准/故障/采样空档，不能臆造持续超标 */
+  | 'OPEN_DATA_GAP'
+  /** 因标准中途调整被切开，后半段另立事件 */
+  | 'OPEN_LIMIT_CHANGE';
+
+export const EVENT_STATUS_LABELS: Record<EventStatus, string> = {
+  CLOSED: '已闭合（实测回落）',
+  OPEN_BOUNDARY: '开放：边界未落到限值以下',
+  OPEN_END_OF_WINDOW: '开放：跨自然日',
+  OPEN_DATA_GAP: '开放：证据中断',
+  OPEN_LIMIT_CHANGE: '切开：限值调整',
+};
+
+export type EvidenceKind = 'MEASURED' | 'INTERPOLATED' | 'GAP_UNKNOWN' | 'UNMODELLED';
+
+export const EVIDENCE_LABELS: Record<EvidenceKind, string> = {
+  MEASURED: '实测超限',
+  INTERPOLATED: '可插值超限',
+  GAP_UNKNOWN: '未知空档',
+  UNMODELLED: '未建模',
+};
+
+export type EvidenceEndReason =
+  | 'BELOW_LIMIT'
+  | 'CENSOR_BOUNDARY'
+  | 'STATE_CHANGE'
+  | 'CALIBRATION_CUT'
+  | 'GAP_START'
+  | 'LIMIT_CHANGE'
+  | 'INSTRUMENT_SWAP'
+  | 'WINDOW_END';
+
+export const EVIDENCE_END_LABELS: Record<EvidenceEndReason, string> = {
+  BELOW_LIMIT: '实测回落到限值以下',
+  CENSOR_BOUNDARY: '边界读数恰在限值上，无法判定何时回落',
+  STATE_CHANGE: '状态切换（清洗/校准/旁路/故障）终止插值链',
+  CALIBRATION_CUT: '校准体制切换，证据链换校准系数',
+  GAP_START: '采样空档开始，终止插值链',
+  LIMIT_CHANGE: '标准限值调整，事件切开',
+  INSTRUMENT_SWAP: '仪表交接，证据链换实例',
+  WINDOW_END: '到达自然日/查询窗口终点',
+};
+
+/** 事件内的一段证据。只允许在相邻实测结点之间做线性插值，绝不跨状态/空档/校准/实例边界。 */
+export interface EvidenceSegment {
+  evidenceId: string;
+  kind: EvidenceKind;
+  from: number;
+  to: number;
+  seconds: number;
+  startValue: number | null;
+  endValue: number | null;
+  peak: number | null;
+  peakAt: number | null;
+  instrumentId: string | null;
+  calibrationId: string | null;
+  state: DeviceState | null;
+  readingIds: string[];
+  boundaryRefs: string[];
+  endReason: EvidenceEndReason;
+  note: string;
 }
+
+export type EventBoundaryKind =
+  | 'CROSS_UP'
+  | 'CROSS_DOWN'
+  | 'STATE_CUT'
+  | 'GAP_START'
+  | 'GAP_END'
+  | 'LIMIT_CHANGE'
+  | 'INSTRUMENT_SWAP'
+  | 'WINDOW_END'
+  | 'CENSOR_START';
+
+export interface EventBoundary {
+  at: number;
+  kind: EventBoundaryKind;
+  refId: string | null;
+  label: string;
+  /** 穿越点是否由插值推算（非实测读数） */
+  interpolated: boolean;
+}
+
+export interface IntervalEvidence {
+  /** 相邻实测结点均超限的时长（扣除穿越点之间的插值段） */
+  measuredSeconds: number;
+  /** 由两端实测读数插值推算的穿越点之间时长 */
+  interpolatedSeconds: number;
+  /** 证据中断且无法判定的时长（清洗、空档、缺测） */
+  unknownSeconds: number;
+  /** 超出限值的面积 ∫(c−limit)+ dt，单位 mg/L·s */
+  excessAreaMgLs: number;
+  segments: EvidenceSegment[];
+  /** 是否可以在“不臆造”的前提下断言整段持续超标 */
+  continuous: boolean;
+  interpolationRule: string;
+  unknownPolicy: string;
+  notes: string[];
+}
+
+export interface IntervalGap {
+  gapId: string;
+  pollutant: Pollutant;
+  from: number;
+  to: number;
+  seconds: number;
+  kind: GapKind;
+  /** 缺口两侧最近的实测浓度（若有） */
+  beforeValue: number | null;
+  afterValue: number | null;
+  /** 该空档是否嵌在一个超标事件中间（两侧都超限） */
+  insideEvent: boolean;
+  /** 不能据相邻高值断言持续超标 */
+  possibleExceedance: boolean;
+  limit: number;
+  effect: string;
+  refIds: string[];
+}
+
+export interface StandardWindowLite {
+  limit: number;
+  from: number;
+  to: number;
+  standardId: string;
+}
+
+export interface ExceedanceEvent {
+  eventId: string;
+  pointCode: string;
+  plantId: string;
+  day: string;
+  pollutant: Pollutant;
+  kind: EventKind;
+  startAt: number;
+  /** 结束时刻；null 表示仍未闭合 */
+  endAt: number | null;
+  status: EventStatus;
+  limit: number;
+  standardId: string;
+  limitBasis: string;
+  /** 限值中途调整造成切分的时刻 */
+  limitChangeAt: number | null;
+  measuredSeconds: number;
+  interpolatedSeconds: number;
+  unknownSeconds: number;
+  /** 事件已确证覆盖的时长（= 实测 + 插值），不含未知空档 */
+  durationSeconds: number;
+  /** 事件从开始到最后一个证据端点的跨度（含未知空档） */
+  spanSeconds: number;
+  peak: number;
+  peakAt: number;
+  excessAreaMgLs: number;
+  /** 超出限值的污染负荷估计 kg（需要该时段流量证据） */
+  excessLoadKg: LoadBounds | null;
+  evidence: IntervalEvidence;
+  endReason: string;
+  boundaries: EventBoundary[];
+  standardWindow: StandardWindow;
+  sourceReadingIds: string[];
+  sourceStateIds: string[];
+  sourceFileIds: string[];
+  dispositionIds: string[];
+  strategy: DerivationStrategy;
+  derivedAt: number;
+  engineVersion: string;
+  notes: string[];
+}
+
+export interface PollutantEventStats {
+  pollutant: Pollutant;
+  eventCount: number;
+  measuredSeconds: number;
+  interpolatedSeconds: number;
+  unknownSeconds: number;
+  maxPeak: number;
+  excessAreaMgLs: number;
+  excessLoadKg: LoadBounds | null;
+  openEvents: number;
+  limitSegments: StandardWindowLite[];
+}
+
+/** 事件推导的输入签名：任何来源读数、状态、校准、限值、处置变化都会改变它 */
+export interface InputSignature {
+  readingIdsHash: string;
+  stateIdsHash: string;
+  calibrationIdsHash: string;
+  standardIdsHash: string;
+  /** 读数数量与最大接收时刻，捕捉迟到补传/修订 */
+  readingCount: number;
+  latestReceivedAt: number;
+  standardRevision: string;
+  signature: string;
+}
+
+export interface DayEventSummary {
+  day: string;
+  pointCode: string;
+  plantId: string;
+  strategy: DerivationStrategy;
+  computedAt: number;
+  computeMs: number;
+  engineVersion: string;
+  windows: StandardWindow[];
+  conflicts: StandardConflict[];
+  events: ExceedanceEvent[];
+  gaps: IntervalGap[];
+  perPollutant: PollutantEventStats[];
+  inputSignature: InputSignature;
+  sourceReadingIds: string[];
+  sourceFileIds: string[];
+  sourceStateIds: string[];
+  sourceCalibrationIds: string[];
+  sourceStandardIds: string[];
+  sourceDispositionIds: string[];
+  notes: string[];
+}
+
+/** 物化缓存：带来源索引的事件片段与输入签名 */
+export interface EventSnapshotRecord {
+  cacheKey: string;
+  pointCode: string;
+  day: string;
+  strategy: DerivationStrategy;
+  inputSignature: string;
+  derivedAt: number;
+  engineVersion: string;
+  windowFrom: number;
+  windowTo: number;
+  summary: DayEventSummary;
+}
+
+export interface CacheInvalidation {
+  before: EventSnapshotRecord;
+  after: EventSnapshotRecord | null;
+  signatureChanged: boolean;
+  beforeEventIds: string[];
+  afterEventIds: string[];
+  addedEventIds: string[];
+  removedEventIds: string[];
+  changedEventIds: string[];
+  reasons: string[];
+  /** 仍未失效的事件（来源窗口不含变化点时保留） */
+  unchangedEventIds: string[];
+}
+
+/* ------------------------------------------------------------------ *
+ * 申报核对：自然日申报值由事件汇总，补传/限值调整使草稿转入复核；
+ * 迟到处置记录只能补证，不能宣布超标已消失。
+ * ------------------------------------------------------------------ */
+
+export type DraftStatus = 'DRAFT' | 'FILED' | 'NEEDS_RECHECK' | 'SUPERSEDED';
+
+export const DRAFT_STATUS_LABELS: Record<DraftStatus, string> = {
+  DRAFT: '草稿',
+  FILED: '已出具',
+  NEEDS_RECHECK: '待复核',
+  SUPERSEDED: '已被替代',
+};
+
+export interface ReportLimitWindow {
+  limit: number;
+  from: number;
+  to: number;
+  standardId: string;
+}
+
+export interface DailyReportRow {
+  pollutant: Pollutant;
+  eventIds: string[];
+  /** 只计实测与可插值的超出时长；未知空档单列 */
+  reportableSeconds: number;
+  measuredSeconds: number;
+  interpolatedSeconds: number;
+  unknownSeconds: number;
+  peak: number;
+  peakAt: number;
+  limitWindows: ReportLimitWindow[];
+  excessAreaMgLs: number;
+  excessLoadKg: LoadBounds | null;
+  notes: string[];
+}
+
+export interface DailyReportDraft {
+  draftId: string;
+  pointCode: string;
+  plantId: string;
+  day: string;
+  createdAt: number;
+  createdBy: string;
+  status: DraftStatus;
+  strategy: DerivationStrategy;
+  snapshotSignature: string;
+  cutoffReceivedAt: number;
+  rows: DailyReportRow[];
+  events: ExceedanceEvent[];
+  gaps: IntervalGap[];
+  notes: string[];
+  invalidatedBy?: { reason: string; at: number; detail: string };
+  reviewedBy?: string;
+  reviewedAt?: number;
+  reviewNote?: string;
+}
+
+export interface ReportChange {
+  pollutant: Pollutant;
+  eventId: string | null;
+  field: string;
+  before: string;
+  after: string;
+  kind: 'ADDED' | 'REMOVED' | 'CHANGED' | 'EVIDENCE' | 'LIMIT';
+}
+
+export interface DailyReportCheck {
+  draft: DailyReportDraft;
+  currentSummary: DayEventSummary | null;
+  currentSignature: string | null;
+  status: 'MATCH' | 'NEEDS_RECHECK' | 'STALE_CACHE_BLOCKED';
+  changes: ReportChange[];
+  canFile: boolean;
+  message: string;
+}
+
 
 export interface PeakWindow {
   /** 1 小时滑动负荷峰值（kg） */
@@ -214,6 +646,7 @@ export interface SegmentBoundary {
     | 'CALIBRATION'
     | 'STATE'
     | 'INSTRUMENT_SWAP'
+    | 'STANDARD_CHANGE'
     | 'GAP';
   at: number;
   refId: string | null;
@@ -339,8 +772,10 @@ export interface ResampleCheck {
 
 export interface PollutantTrace {
   pollutant: Pollutant;
-  /** 排放限值 mg/L */
+  /** 主限值 mg/L（限值中途调整时取首个窗口；逐段限值见 exceedances[].limit） */
   standard: number;
+  /** 当日限值窗口（标准适用库按生效边界切分） */
+  standardWindows?: StandardWindow[];
   load: LoadBounds;
   effectiveSeconds: number;
   excludedSeconds: number;
@@ -557,6 +992,8 @@ export interface Dataset {
   bindings: Binding[];
   readings: Reading[];
   files: IntakeFile[];
+  standards: StandardRule[];
+  dispositions: DispositionRecord[];
 }
 
 export interface SampleManifest {
@@ -573,6 +1010,15 @@ export interface SampleManifest {
     note: string;
   }[];
   lateFile: {
+    fileName: string;
+    kind: FileKind;
+    receivedAt: string;
+    rowCount: number;
+    sha256: string;
+    note: string;
+  };
+  /** 申报后到达的处置记录（晚于申报截止，只能补证） */
+  lateDispositionFile?: {
     fileName: string;
     kind: FileKind;
     receivedAt: string;

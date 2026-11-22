@@ -73,7 +73,7 @@ export function HierarchyPage({ state, actions, onNavigate }: Props) {
             <button className="btn" onClick={() => void actions.recompute()} disabled={state.computing || dataset.readings.length === 0}>
               {state.computing ? '计算中…' : '重算当前点位'}
             </button>
-            <button className="btn" onClick={() => onNavigate('segments')}>
+            <button className="btn" onClick={() => onNavigate('trace')}>
               进入片段追溯
             </button>
           </div>

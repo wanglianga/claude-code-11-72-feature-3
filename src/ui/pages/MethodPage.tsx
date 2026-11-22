@@ -104,10 +104,41 @@ export function MethodPage({ state }: { state: AppState }) {
         </div>
       </div>
 
+      <div className="card">
+        <div className="card-head">
+          <h2>事件监控口径（超标 ≠ 单行读数超阈值）</h2>
+          <span className="sub">与负荷引擎共用同一片段编织结果；两种派生方案共用同一套判定规则</span>
+        </div>
+        <div className="card-pad grid cols-2">
+          <div className="stack">
+            <h3 className="small">事件如何被推出</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>事件 = 有效浓度片段 × 标准窗口 × 状态边界 × 间隔证据；不是逐行比较阈值。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>穿越点由相邻实测读数线性插值推算；插值只在同一实例、同一校准体制、OK 状态内进行。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>证据段分实测 / 插值 / 未知：两端实测均超限为实测；一端超限一端不超限为插值；空档为未知。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>清洗、校准、旁路、故障一开始立即终止插值链，事件只能以“开放”结束。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>采样空档只在两侧实测均超限且 ≤15 分钟时并入同一事件，并标为未知，不计入超标时长。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>边界读数恰在限值上只能判为“开放：边界未回落”，不得推定已结束。</span></li>
+            </ul>
+          </div>
+          <div className="stack">
+            <h3 className="small">标准、缓存与申报</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>限值来自标准适用库（排口 × 因子 × 时段 × 生效日期）；19:00 调整处事件必须切开。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>物化快照 = 读数到达即派生并带来源索引；补传或限值调整改变输入签名后，旧快照成批失效。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>查询时推导只持久化原始有效片段与法规条件；修订影响小，但计算压力移到调查与月末。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>两种方案对同一冻结输入必须给出同一事件集合；不能以缓存旧事件替代当前证据。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>申报值只汇总实测 + 插值时长；未知空档单列。补传/限值调整使草稿转入复核。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>处置记录只登记同现（causalClaim=false）；迟到处置只能补证，不能宣布超标已消失。</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <div className="card card-pad">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <div className="small muted">
-            计算引擎版本 {state.snapshot?.engineVersion ?? '1.1.0'}；作用域：包含 SUSPECT={String(state.scope.includeSuspect)}，
+            计算引擎版本 {state.snapshot?.engineVersion ?? '1.1.0'}；事件引擎 {state.eventSummary?.engineVersion ?? '2.0.0'}；作用域：包含 SUSPECT={String(state.scope.includeSuspect)}，
             膨胀系数 k={state.scope.uncertaintyMultiplier}，网格 {state.scope.gridSeconds}s。
           </div>
           <span className="badge neutral">WebWorker 内计算 · IndexedDB 本地存储 · 断网可用</span>

@@ -15,13 +15,17 @@ import { openDB, IDBPDatabase, DBSchema } from 'idb';
 import type {
   Binding,
   Calibration,
+  DailyReportDraft,
   Declaration,
+  DispositionRecord,
+  EventSnapshotRecord,
   Instrument,
   IntakeFile,
   OutfallPoint,
   Plant,
   Reading,
   RecalcCandidate,
+  StandardRule,
   StatePeriod,
 } from '../domain/types';
 
@@ -50,13 +54,17 @@ interface StoreSchema extends DBSchema {
   };
   declarations: { key: string; value: Declaration; indexes: { 'by-point-day': string } };
   recalc: { key: string; value: RecalcCandidate; indexes: { 'by-declaration': string; 'by-point-day': string } };
+  standards: { key: string; value: StandardRule; indexes: { 'by-point': string } };
+  dispositions: { key: string; value: DispositionRecord; indexes: { 'by-point': string } };
+  eventSnapshots: { key: string; value: EventSnapshotRecord; indexes: { 'by-point-day': string } };
+  reportDrafts: { key: string; value: DailyReportDraft; indexes: { 'by-point-day': string } };
   audits: { key: string; value: AuditEntry };
 }
 
 type FileKind = IntakeFile['kind'];
 
 export const DB_NAME = 'outfall-review';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 export const SCHEMA_KEY = 'schemaVersion';
 export const SAMPLE_KEY = 'sampleImported';
 
@@ -67,31 +75,52 @@ let dbPromise: Promise<ReviewDB> | null = null;
 export function getDb(): Promise<ReviewDB> {
   if (!dbPromise) {
     dbPromise = openDB<StoreSchema>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore('meta');
-        const intake = db.createObjectStore('intake', { keyPath: 'fileId' });
-        intake.createIndex('by-kind', 'kind');
-        db.createObjectStore('plants', { keyPath: 'plantId' });
-        const points = db.createObjectStore('points', { keyPath: 'pointCode' });
-        points.createIndex('by-plant', 'plantId');
-        const instruments = db.createObjectStore('instruments', { keyPath: 'instrumentId' });
-        instruments.createIndex('by-point', 'pointCode');
-        const calibrations = db.createObjectStore('calibrations', { keyPath: 'calibrationId' });
-        calibrations.createIndex('by-instrument', 'instrumentId');
-        const states = db.createObjectStore('states', { keyPath: 'stateId' });
-        states.createIndex('by-instrument', 'instrumentId');
-        const bindings = db.createObjectStore('bindings', { keyPath: 'bindingId' });
-        bindings.createIndex('by-point', 'pointCode');
-        const readings = db.createObjectStore('readings', { keyPath: 'readingId' });
-        readings.createIndex('by-point-day', 'dayKey');
-        readings.createIndex('by-instrument', 'instrumentId');
-        readings.createIndex('by-file', 'sourceFileId');
-        const declarations = db.createObjectStore('declarations', { keyPath: 'declarationId' });
-        declarations.createIndex('by-point-day', 'day');
-        const recalc = db.createObjectStore('recalc', { keyPath: 'candidateId' });
-        recalc.createIndex('by-declaration', 'declarationId');
-        recalc.createIndex('by-point-day', 'day');
-        db.createObjectStore('audits', { keyPath: 'auditId' });
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('meta');
+          const intake = db.createObjectStore('intake', { keyPath: 'fileId' });
+          intake.createIndex('by-kind', 'kind');
+          db.createObjectStore('plants', { keyPath: 'plantId' });
+          const points = db.createObjectStore('points', { keyPath: 'pointCode' });
+          points.createIndex('by-plant', 'plantId');
+          const instruments = db.createObjectStore('instruments', { keyPath: 'instrumentId' });
+          instruments.createIndex('by-point', 'pointCode');
+          const calibrations = db.createObjectStore('calibrations', { keyPath: 'calibrationId' });
+          calibrations.createIndex('by-instrument', 'instrumentId');
+          const states = db.createObjectStore('states', { keyPath: 'stateId' });
+          states.createIndex('by-instrument', 'instrumentId');
+          const bindings = db.createObjectStore('bindings', { keyPath: 'bindingId' });
+          bindings.createIndex('by-point', 'pointCode');
+          const readings = db.createObjectStore('readings', { keyPath: 'readingId' });
+          readings.createIndex('by-point-day', 'dayKey');
+          readings.createIndex('by-instrument', 'instrumentId');
+          readings.createIndex('by-file', 'sourceFileId');
+          const declarations = db.createObjectStore('declarations', { keyPath: 'declarationId' });
+          declarations.createIndex('by-point-day', 'day');
+          const recalc = db.createObjectStore('recalc', { keyPath: 'candidateId' });
+          recalc.createIndex('by-declaration', 'declarationId');
+          recalc.createIndex('by-point-day', 'day');
+          db.createObjectStore('audits', { keyPath: 'auditId' });
+        }
+        if (oldVersion < 2) {
+          // 标准适用库、处置关联簿、事件快照缓存、申报草稿
+          if (!db.objectStoreNames.contains('standards')) {
+            const standards = db.createObjectStore('standards', { keyPath: 'standardId' });
+            standards.createIndex('by-point', 'pointCode');
+          }
+          if (!db.objectStoreNames.contains('dispositions')) {
+            const dispositions = db.createObjectStore('dispositions', { keyPath: 'dispositionId' });
+            dispositions.createIndex('by-point', 'pointCode');
+          }
+          if (!db.objectStoreNames.contains('eventSnapshots')) {
+            const snaps = db.createObjectStore('eventSnapshots', { keyPath: 'cacheKey' });
+            snaps.createIndex('by-point-day', 'pointCode');
+          }
+          if (!db.objectStoreNames.contains('reportDrafts')) {
+            const drafts = db.createObjectStore('reportDrafts', { keyPath: 'draftId' });
+            drafts.createIndex('by-point-day', 'pointCode');
+          }
+        }
       },
       blocked() {
         console.warn('IndexedDB 升级被其他标签页阻塞');
@@ -134,6 +163,10 @@ export async function clearAll(): Promise<void> {
     'readings',
     'declarations',
     'recalc',
+    'standards',
+    'dispositions',
+    'eventSnapshots',
+    'reportDrafts',
     'audits',
     'meta',
   ] as const;
@@ -152,6 +185,8 @@ const STORE_NAMES: Record<string, string> = {
   states: 'states',
   bindings: 'bindings',
   readings: 'readings',
+  standards: 'standards',
+  dispositions: 'dispositions',
 };
 
 export async function putBatch(patch: {
@@ -163,6 +198,8 @@ export async function putBatch(patch: {
   states?: StatePeriod[];
   bindings?: Binding[];
   readings?: Reading[];
+  standards?: StandardRule[];
+  dispositions?: DispositionRecord[];
 }): Promise<void> {
   const db = await getDb();
   const keys = (Object.keys(patch) as (keyof typeof patch)[]).filter(
@@ -199,19 +236,24 @@ export async function getAllKv(): Promise<{
   bindings: Binding[];
   readings: Reading[];
   files: IntakeFile[];
+  standards: StandardRule[];
+  dispositions: DispositionRecord[];
 }> {
   const db = await getDb();
-  const [plants, points, instruments, calibrations, states, bindings, readings, files] = await Promise.all([
-    db.getAll('plants'),
-    db.getAll('points'),
-    db.getAll('instruments'),
-    db.getAll('calibrations'),
-    db.getAll('states'),
-    db.getAll('bindings'),
-    db.getAll('readings'),
-    db.getAll('intake'),
-  ]);
-  return { plants, points, instruments, calibrations, states, bindings, readings, files };
+  const [plants, points, instruments, calibrations, states, bindings, readings, files, standards, dispositions] =
+    await Promise.all([
+      db.getAll('plants'),
+      db.getAll('points'),
+      db.getAll('instruments'),
+      db.getAll('calibrations'),
+      db.getAll('states'),
+      db.getAll('bindings'),
+      db.getAll('readings'),
+      db.getAll('intake'),
+      db.getAll('standards'),
+      db.getAll('dispositions'),
+    ]);
+  return { plants, points, instruments, calibrations, states, bindings, readings, files, standards, dispositions };
 }
 
 export async function addAudit(entry: Omit<AuditEntry, 'auditId'>): Promise<AuditEntry> {
@@ -309,4 +351,71 @@ export async function intakeFiles(): Promise<IntakeFile[]> {
 export async function currentSchema(): Promise<number> {
   const db = await getDb();
   return db.version;
+}
+
+/* ------------------------------------------------------------------ *
+ * 事件快照（物化缓存）与申报草稿
+ * ------------------------------------------------------------------ */
+
+export function eventCacheKey(pointCode: string, day: string): string {
+  return `EVSNAP:${pointCode}:${day}`;
+}
+
+export async function getEventSnapshot(pointCode: string, day: string): Promise<EventSnapshotRecord | undefined> {
+  const db = await getDb();
+  return db.get('eventSnapshots', eventCacheKey(pointCode, day));
+}
+
+export async function listEventSnapshots(): Promise<EventSnapshotRecord[]> {
+  const db = await getDb();
+  const all = await db.getAll('eventSnapshots');
+  return all.sort((a, b) => b.derivedAt - a.derivedAt);
+}
+
+export async function saveEventSnapshot(record: EventSnapshotRecord): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(['eventSnapshots', 'audits'], 'readwrite');
+  const existing = await tx.objectStore('eventSnapshots').get(record.cacheKey);
+  await tx.objectStore('eventSnapshots').put(record);
+  await tx.objectStore('audits').put({
+    auditId: `audit-${record.derivedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    at: record.derivedAt,
+    actor: '系统',
+    action: existing ? 'EVENT_SNAPSHOT_REFRESH' : 'EVENT_SNAPSHOT_CREATE',
+    detail: `${record.pointCode} ${record.day} 事件快照（${record.summary.events.length} 个事件），签名 ${record.inputSignature.slice(0, 8)}`,
+    refIds: [record.cacheKey],
+  });
+  await tx.done;
+}
+
+export async function deleteEventSnapshot(pointCode: string, day: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('eventSnapshots', eventCacheKey(pointCode, day));
+}
+
+export async function listReportDrafts(): Promise<DailyReportDraft[]> {
+  const db = await getDb();
+  const all = await db.getAll('reportDrafts');
+  return all.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export async function saveReportDraft(draft: DailyReportDraft): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(['reportDrafts', 'audits'], 'readwrite');
+  const existing = await tx.objectStore('reportDrafts').get(draft.draftId);
+  await tx.objectStore('reportDrafts').put(draft);
+  await tx.objectStore('audits').put({
+    auditId: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    at: Date.now(),
+    actor: draft.reviewedBy ?? draft.createdBy,
+    action: !existing ? 'REPORT_DRAFT_CREATE' : draft.status === 'FILED' ? 'REPORT_DRAFT_FILE' : 'REPORT_DRAFT_UPDATE',
+    detail: `${draft.pointCode} ${draft.day} 申报草稿 ${draft.draftId}：${draft.status}${draft.invalidatedBy ? `（${draft.invalidatedBy.reason}）` : ''}`,
+    refIds: [draft.draftId],
+  });
+  await tx.done;
+}
+
+export async function getReportDraft(draftId: string): Promise<DailyReportDraft | undefined> {
+  const db = await getDb();
+  return db.get('reportDrafts', draftId);
 }

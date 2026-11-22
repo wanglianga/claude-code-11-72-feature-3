@@ -17,9 +17,13 @@ import type { SampleManifest } from '../src/domain/types';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sampleDir = resolve(__dirname, '../public/sample');
 const manifest = JSON.parse(readFileSync(resolve(sampleDir, 'manifest.json'), 'utf8')) as SampleManifest;
-const { baseDataset, lateReadings } = parseSampleFromDisk(sampleDir, manifest);
+const { baseDataset, lateReadings, lateDispositions } = parseSampleFromDisk(sampleDir, manifest);
 import { compareRoutes, computeDayLoad, computeMonthLoad, readingsForDay } from '../src/domain/engine';
 import { buildIndex, calibrationAt, stateAt } from '../src/domain/weave';
+import { deriveDayEvents, compareDerivations } from '../src/domain/events';
+import { buildDraft, checkReportDraft } from '../src/domain/dailyReport';
+import { linkDispositions, lateDispositionEffect } from '../src/domain/dispositions';
+import { mergeDataset } from '../src/sample/ingest';
 import { dayKeyFromMs } from '../src/domain/time';
 import type { Dataset, Declaration, RecalcCandidate } from '../src/domain/types';
 
@@ -211,10 +215,70 @@ for (const p of baseDataset.points) {
   const snap = computeDayLoad(baseDataset, p.pointCode, day, 'SEGMENT');
   console.log(`  ${p.pointCode}（${p.plantId}）：覆盖 ${(snap.coverage * 100).toFixed(2)}%，资格 ${snap.eligibility.status}，COD ${fmt(snap.pollutants[0].load.best)} kg`);
 }
-check('四个点位均可计算', baseDataset.points.every((p) => {
+check('全部点位均可计算', baseDataset.points.every((p) => {
   const snap = computeDayLoad(baseDataset, p.pointCode, day, 'SEGMENT');
   return snap.pollutants.every((t) => t.effectiveSeconds > 0);
 }), baseDataset.points.map((p) => p.pointCode).join('，'));
+
+console.log('\n=== 12. 标准适用库：限值中途调整 ===');
+const stdWindows = [
+  ...buildIndexWindows('COD'),
+];
+function buildIndexWindows(pollutant: 'COD' | 'NH3N') {
+  const summary = deriveDayEvents(baseDataset, point, day);
+  return summary.windows.filter((w) => w.pollutant === pollutant);
+}
+for (const w of stdWindows) {
+  console.log(`  COD 标准窗口：${w.limit} mg/L · ${new Date(w.from + 8 * 3600_000).toISOString().slice(11, 19)} → ${new Date(w.to + 8 * 3600_000).toISOString().slice(11, 19)} · ${w.standardId}`);
+}
+check('当日存在限值调整', stdWindows.length === 2, `${stdWindows.length} 个窗口：${stdWindows.map((w) => w.limit).join(' → ')}`);
+check('限值调整发生在 19:00', Boolean(stdWindows[1] && new Date(stdWindows[1].from + 8 * 3600_000).toISOString().slice(11, 16) === '19:00'), stdWindows[1]?.standardId ?? '—');
+
+console.log('\n=== 13. 事件推导与证据分段 ===');
+const events = deriveDayEvents(baseDataset, point, day, { strategy: 'DERIVE_ON_DEMAND' });
+const codEvents = events.events.filter((e) => e.pollutant === 'COD');
+const fmtEv = (e: typeof codEvents[number]) =>
+  `${new Date(e.startAt + 8 * 3600_000).toISOString().slice(11, 19)} → ${e.endAt ? new Date(e.endAt + 8 * 3600_000).toISOString().slice(11, 19) : '未闭合'}（${e.status}，限值 ${e.limit}）`;
+for (const e of codEvents) {
+  console.log(`  ${fmtEv(e)} 实测 ${e.measuredSeconds.toFixed(1)}s / 插值 ${e.interpolatedSeconds.toFixed(1)}s / 未知 ${e.unknownSeconds.toFixed(0)}s，峰值 ${e.peak.toFixed(1)}`);
+}
+const shockEvent = codEvents.find((e) => Math.abs(e.startAt - Date.UTC(2026, 10, 17, 1, 15, 0)) < 60_000 || (e.startAt >= Date.UTC(2026, 10, 18, 1, 15, 0) && e.startAt < Date.UTC(2026, 10, 18, 1, 16, 0)));
+check('40 秒冲击事件按插值闭合', Boolean(shockEvent && Math.abs(shockEvent.measuredSeconds + shockEvent.interpolatedSeconds - 40) <= 1), shockEvent ? `${(shockEvent.measuredSeconds + shockEvent.interpolatedSeconds).toFixed(1)} s（插值 ${shockEvent.interpolatedSeconds.toFixed(1)} s）` : '未检出');
+const plateau = codEvents.find((e) => e.startAt >= Date.UTC(2026, 10, 18, 8, 55, 0) && e.startAt < Date.UTC(2026, 10, 18, 9, 5, 0));
+check('持续平台以实测为主', Boolean(plateau && plateau.measuredSeconds > 200), plateau ? `实测 ${plateau.measuredSeconds.toFixed(0)} s / 插值 ${plateau.interpolatedSeconds.toFixed(1)} s` : '未检出');
+const openCut = codEvents.find((e) => e.limit === 50 && e.startAt > Date.UTC(2026, 10, 18, 10, 30, 0) && e.startAt < Date.UTC(2026, 10, 18, 11, 0, 0));
+check('限值调整处事件被切开', Boolean(openCut && openCut.status === 'OPEN_LIMIT_CHANGE'), openCut ? fmtEv(openCut) : '未检出');
+const gapEvent = codEvents.find((e) => e.startAt >= Date.UTC(2026, 10, 18, 13, 55, 0) && e.startAt < Date.UTC(2026, 10, 18, 14, 5, 0));
+check('跨采样空档事件含未知时长且不判连续', Boolean(gapEvent && gapEvent.unknownSeconds >= 240 && !gapEvent.evidence.continuous), gapEvent ? `未知 ${gapEvent.unknownSeconds.toFixed(0)} s` : '未检出');
+const flushGap = events.gaps.find((g) => g.kind === 'EXCLUDED_STATE' && new Date(g.from + 8 * 3600_000).toISOString().slice(11, 16) === '21:00');
+check('清洗开始终止插值链', Boolean(flushGap), flushGap ? `21:00 起 ${flushGap.seconds.toFixed(0)} s 排除，事件保持开放` : '未检出');
+const boundaryPoint = deriveDayEvents(baseDataset, 'HX-E03', day);
+check('边界读数恰在限值上 → 开放', boundaryPoint.events.some((e) => e.status === 'OPEN_BOUNDARY'), boundaryPoint.events.map(fmtEv).join('；') || '无事件');
+
+console.log('\n=== 14. 两种派生方案必须一致 ===');
+const pA = deriveDayEvents(baseDataset, point, day, { strategy: 'PERSIST_SNAPSHOT' });
+const pB = deriveDayEvents(baseDataset, point, day, { strategy: 'DERIVE_ON_DEMAND' });
+const eq = compareDerivations(pA, pB);
+check('同一冻结输入事件集合一致', eq.equal, `${eq.eventCount} 个事件；签名一致=${eq.signatureEqual}`);
+
+console.log('\n=== 15. 申报核对与草稿失效 ===');
+const draft = buildDraft(events, { createdBy: '核验脚本', now: Date.now(), cutoffReceivedAt: Date.UTC(2026, 10, 18, 23, 20, 0), strategy: 'DERIVE_ON_DEMAND', serial: 1 });
+for (const row of draft.rows) {
+  console.log(`  ${row.pollutant}：上报 ${row.reportableSeconds.toFixed(1)} s（实测 ${row.measuredSeconds.toFixed(1)} + 插值 ${row.interpolatedSeconds.toFixed(1)}），未知 ${row.unknownSeconds.toFixed(0)} s，限值窗口 ${row.limitWindows.map((w) => w.limit).join('→')}`);
+}
+check('上报时长 = 实测 + 插值', draft.rows.every((r) => Math.abs(r.reportableSeconds - (r.measuredSeconds + r.interpolatedSeconds)) < 1e-6), '未知空档未计入');
+check('限值窗口分别披露', (draft.rows.find((r) => r.pollutant === 'COD')?.limitWindows.length ?? 0) === 2, 'COD 50 与 40 两个窗口');
+const match = checkReportDraft(draft, events, { cacheStale: false, allowDerive: true });
+check('无变化时草稿一致', match.status === 'MATCH', match.message);
+const augmentedEvents = mergeDataset(baseDataset, { readings: lateReadings, dispositions: lateDispositions });
+const events2 = deriveDayEvents(augmentedEvents, point, day);
+const recheck = checkReportDraft(draft, events2, { cacheStale: false, allowDerive: true });
+check('补传后草稿转入复核', recheck.status === 'NEEDS_RECHECK', `${recheck.changes.length} 处变化：${recheck.changes.slice(0, 3).map((c) => c.field).join('、')}`);
+const lateEv = events2.events.find((e) => e.startAt >= Date.UTC(2026, 10, 18, 12, 30, 0) && e.startAt < Date.UTC(2026, 10, 18, 13, 15, 0));
+const links = lateEv ? linkDispositions(lateEv, augmentedEvents.dispositions, Date.UTC(2026, 10, 18, 23, 20, 0)) : [];
+const lateNotes = lateDispositionEffect(links);
+check('迟到处置只补证', events2.events.length === events.events.length && links.every((l) => l.causalClaim === false), lateNotes[0] ?? '窗口内无迟到处置（其他窗口另行核对）');
+check('迟到处置不能删除事件', Boolean(lateEv && events2.events.some((e) => e.eventId === lateEv.eventId)), lateEv ? `${lateEv.eventId} 仍在` : '窗口内无事件');
 
 const readingCount = readingsForDay(baseDataset, point, day).length;
 console.log(`\nCC-E01 当日读数 ${readingCount} 行；样例总读数 ${baseDataset.readings.length} 行`);

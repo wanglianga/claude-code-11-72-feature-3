@@ -135,9 +135,10 @@ function addSpan(
   to: number,
   peak: number,
   peakAt: number,
+  limit?: number,
 ): void {
   if (to - from <= EPS) return;
-  list.push({ from, to, seconds: (to - from) / 1000, peak, peakAt });
+  list.push({ from, to, seconds: (to - from) / 1000, peak, peakAt, limit });
 }
 
 function finalizeCrossings(list: ExceedanceInterval[]): ExceedanceInterval[] {
@@ -156,17 +157,26 @@ function finalizeCrossings(list: ExceedanceInterval[]): ExceedanceInterval[] {
   return merged.filter((e) => e.to - e.from > EPS);
 }
 
-export function exactCrossings(pieces: Piece[], standard: number): ExceedanceInterval[] {
-  const found: ExceedanceInterval[] = [];
+export type LimitAt = (at: number) => number;
+
+/** 仅当限值在 [a,b] 内恒定且两端都超限时，才把整段记为一段穿越；否则按限值切换点再切 */
+function crossingSpans(
+  pieces: Piece[],
+  limitAt: LimitAt,
+  limitCuts: number[],
+  found: ExceedanceInterval[],
+): void {
   for (const piece of pieces) {
     if (!piece.conc || piece.category !== 'VALID') continue;
     for (const [a, b] of piece.concDomain) {
       const times = new Set<number>([a, b]);
       for (const k of piece.conc.knots) if (k.at > a && k.at < b) times.add(k.at);
+      for (const c of limitCuts) if (c > a && c < b) times.add(c);
       const cuts = [...times].sort((x, y) => x - y);
       if (cuts.length === 1) {
         const v = piece.conc.valueAt(cuts[0]);
-        if (v !== null && v > standard) addSpan(found, cuts[0], b, v, cuts[0]);
+        const limit = limitAt(cuts[0]);
+        if (v !== null && v > limit) addSpan(found, cuts[0], b, v, cuts[0], limit);
         continue;
       }
       for (let i = 1; i < cuts.length; i += 1) {
@@ -175,14 +185,21 @@ export function exactCrossings(pieces: Piece[], standard: number): ExceedanceInt
         const c0 = piece.conc.valueAt(t0);
         const c1 = piece.conc.valueAt(t1);
         if (c0 === null || c1 === null) continue;
-        if (c0 > standard && c1 > standard) addSpan(found, t0, t1, Math.max(c0, c1), c0 >= c1 ? t0 : t1);
+        const standard = limitAt((t0 + 1 + t1) / 2);
+        if (c0 > standard && c1 > standard) addSpan(found, t0, t1, Math.max(c0, c1), c0 >= c1 ? t0 : t1, standard);
         else if (c0 <= standard && c1 > standard)
-          addSpan(found, t0 + ((standard - c0) / (c1 - c0)) * (t1 - t0), t1, c1, t1);
+          addSpan(found, t0 + ((standard - c0) / (c1 - c0)) * (t1 - t0), t1, c1, t1, standard);
         else if (c0 > standard && c1 <= standard)
-          addSpan(found, t0, t0 + ((standard - c0) / (c1 - c0)) * (t1 - t0), c0, t0);
+          addSpan(found, t0, t0 + ((standard - c0) / (c1 - c0)) * (t1 - t0), c0, t0, standard);
       }
     }
   }
+}
+
+export function exactCrossings(pieces: Piece[], standard: number | LimitAt, limitCuts: number[] = []): ExceedanceInterval[] {
+  const found: ExceedanceInterval[] = [];
+  const limitAt: LimitAt = typeof standard === 'function' ? standard : () => standard;
+  crossingSpans(pieces, limitAt, limitCuts, found);
   return finalizeCrossings(found);
 }
 
@@ -197,11 +214,13 @@ export function exactCrossings(pieces: Piece[], standard: number): ExceedanceInt
  */
 export function resampleCrossings(
   pieces: Piece[],
-  standard: number,
+  standard: number | LimitAt,
   gridMs: number,
   anchor: number,
+  limitCuts: number[] = [],
 ): { intervals: ExceedanceInterval[]; unresolved: number; refinedCells: number } {
   const found: ExceedanceInterval[] = [];
+  const limitAt: LimitAt = typeof standard === 'function' ? standard : () => standard;
   let unresolved = 0;
   let refined = 0;
   for (const piece of pieces) {
@@ -211,13 +230,16 @@ export function resampleCrossings(
       const nodes: number[] = [a];
       const first = anchor + Math.ceil((a - anchor) / gridMs) * gridMs;
       for (let t = first; t < b - EPS; t += gridMs) if (t > a + EPS && t < b - EPS) nodes.push(t);
+      for (const c of limitCuts) if (c > a && c < b) nodes.push(c);
       nodes.push(b);
+      nodes.sort((x, y) => x - y);
       for (let i = 1; i < nodes.length; i += 1) {
         const g0 = nodes[i - 1];
         const g1 = nodes[i];
         const c0 = piece.conc.valueAt(g0);
         const c1 = piece.conc.valueAt(g1);
         if (c0 === null || c1 === null) continue;
+        const standard = limitAt((g0 + 1 + g1) / 2);
         const slack = ((g1 - g0) / 1000) * L;
         const lo = Math.min(c0, c1) - slack;
         const hi = Math.max(c0, c1) + slack;
@@ -255,11 +277,11 @@ function collectLinearSpans(
     const c0 = series.valueAt(a);
     const c1 = series.valueAt(b);
     if (c0 === null || c1 === null) continue;
-    if (c0 > standard && c1 > standard) addSpan(out, a, b, Math.max(c0, c1), c0 >= c1 ? a : b);
+    if (c0 > standard && c1 > standard) addSpan(out, a, b, Math.max(c0, c1), c0 >= c1 ? a : b, standard);
     else if (c0 <= standard && c1 > standard)
-      addSpan(out, a + ((standard - c0) / (c1 - c0)) * (b - a), b, c1, b);
+      addSpan(out, a + ((standard - c0) / (c1 - c0)) * (b - a), b, c1, b, standard);
     else if (c0 > standard && c1 <= standard)
-      addSpan(out, a, a + ((standard - c0) / (c1 - c0)) * (b - a), c0, a);
+      addSpan(out, a, a + ((standard - c0) / (c1 - c0)) * (b - a), c0, a, standard);
   }
 }
 
@@ -462,7 +484,10 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
   const hit = cache.get(key);
   if (hit) return hit;
   const pieces = ctx.pieces.get(pollutant)!;
-  const standard = ctx.standards[pollutant];
+  const standardWindows = ctx.standardWindows[pollutant];
+  const standard = standardWindows[0]?.limit ?? ctx.standards[pollutant];
+  const limitCuts = standardWindows.map((w) => w.from).filter((t) => t > ctx.windowFrom && t < ctx.windowTo);
+  const limitAt: LimitAt = (at) => standardWindows.find((w) => w.from <= at && at < w.to)?.limit ?? standard;
   const segments: SegmentSummary[] = [];
   const gaps: GapSummary[] = [];
   const exclusions: ExclusionSummary[] = [];
@@ -548,7 +573,7 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
         if (b - a <= EPS) continue;
         gapMs += b - a;
         const concMissing = totalMs(intersectIntervals(piece.concDomain, [[a, b]])) < b - a - 1;
-        const impact = gapImpact(pieces, a, b, standard, ctx.point.designFlowM3h);
+        const impact = gapImpact(pieces, a, b, limitAt((a + b) / 2), ctx.point.designFlowM3h);
         gaps.push({
           from: a,
           to: b,
@@ -566,7 +591,7 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
       excludedMs += duration;
       const concExcluded = isExcluded(piece.state);
       const flowExcluded = isExcluded(piece.flowState);
-      const impact = gapImpact(pieces, piece.from, piece.to, standard, ctx.point.designFlowM3h);
+      const impact = gapImpact(pieces, piece.from, piece.to, limitAt((piece.from + piece.to) / 2), ctx.point.designFlowM3h);
       const parts: string[] = [];
       if (concExcluded)
         parts.push(
@@ -605,7 +630,7 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
       gapMs += duration;
       const metric =
         !piece.concInstrument || !piece.flowInstrument ? (piece.concInstrument ? 'FLOW' : pollutant) : 'FLOW';
-      const impact = gapImpact(pieces, piece.from, piece.to, standard, ctx.point.designFlowM3h);
+      const impact = gapImpact(pieces, piece.from, piece.to, limitAt((piece.from + piece.to) / 2), ctx.point.designFlowM3h);
       const reason =
         piece.category === 'NO_INSTRUMENT'
           ? `缺少${METRIC_LABELS[metric]}仪表绑定或实例有效期，整段无法归属`
@@ -682,8 +707,8 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
 
   const crossings =
     method === 'SEGMENT'
-      ? exactCrossings(pieces, standard)
-      : resampleCrossings(pieces, standard, gridMs, ctx.windowFrom).intervals;
+      ? exactCrossings(pieces, limitAt, limitCuts)
+      : resampleCrossings(pieces, limitAt, gridMs, ctx.windowFrom, limitCuts).intervals;
   const peak = peakWindow(pieces, method, gridMs, ctx.windowFrom, ctx.windowTo);
   const windowSeconds = (ctx.windowTo - ctx.windowFrom) / 1000;
   const coverage = windowSeconds > 0 ? effectiveMs / 1000 / windowSeconds : 0;
@@ -699,6 +724,7 @@ export function measure(ctx: DayContext, pollutant: Pollutant, method: Integrati
   const trace: PollutantTrace = {
     pollutant,
     standard,
+    standardWindows,
     load: method === 'SEGMENT' ? boundsAround(load, uncertainty) : boundsAround(load, uncertainty + resampleError),
     effectiveSeconds: effectiveMs / 1000,
     excludedSeconds: excludedMs / 1000,
@@ -764,7 +790,13 @@ function buildResampleCheck(ctx: DayContext): ResampleCheck {
       drift = Math.max(drift, exact > 0 ? Math.abs(m.exactLoad - exact) / exact : 0);
       const ref = refPeak.get(pollutant) ?? null;
       if (ref && m.peak) shift = Math.max(shift, Math.abs(ref.center - m.peak.center) / 1000);
-      const cross = resampleCrossings(m.pieces, m.trace.standard, grid * 1000, ctx.windowFrom);
+      const cross = resampleCrossings(
+        m.pieces,
+        (at) => ctx.standardWindows[pollutant].find((w) => w.from <= at && at < w.to)?.limit ?? m.trace.standard,
+        grid * 1000,
+        ctx.windowFrom,
+        ctx.standardWindows[pollutant].map((w) => w.from).filter((t) => t > ctx.windowFrom && t < ctx.windowTo),
+      );
       if (cross.unresolved > 0) accepted = false;
       sym = Math.max(sym, symmetricDiffSeconds(cross.intervals, refCross.get(pollutant) ?? []));
       errBound = Math.max(errBound, m.resampleError);
@@ -844,12 +876,14 @@ function naiveEvidence(
   let load = 0;
   let exceedSeconds = 0;
   const standard = ctx.standards.COD;
+  const codWindows = ctx.standardWindows.COD;
   for (let t = ctx.windowFrom; t < ctx.windowTo; t += gridMs) {
     const v: { c: number; q: number } | null = sample(t + gridMs / 2) ?? last;
     if (!v) continue;
     last = v;
     load += (v.c * v.q * 60) / 3_600_000;
-    if (v.c > standard) exceedSeconds += 60;
+    const limit = codWindows.find((w) => w.from <= t + gridMs / 2 && t + gridMs / 2 < w.to)?.limit ?? standard;
+    if (v.c > limit) exceedSeconds += 60;
   }
   const exact = refLoad.get('COD') ?? 0;
   const exactExceed = (refCross.get('COD') ?? []).reduce((a, e) => a + e.seconds, 0);
@@ -1003,10 +1037,12 @@ function assembleSnapshot(
       notes.push(
         `${METRIC_LABELS[t.pollutant]} 有 ${cuts.length} 处因校准中途生效被切开，两侧分别引用各自校准系数。`,
       );
-    if (t.exceedances.length > 0)
+    if (t.exceedances.length > 0) {
+      const limits = [...new Set(t.exceedances.map((e) => e.limit ?? t.standard))];
       notes.push(
-        `${METRIC_LABELS[t.pollutant]} 共 ${t.exceedances.length} 段超过限值 ${t.standard} mg/L，累计 ${fmtClock(t.exceedanceSeconds * 1000)}；峰值 ${fmt(t.peakConcentration, 2)} mg/L。`,
+        `${METRIC_LABELS[t.pollutant]} 共 ${t.exceedances.length} 段超过限值 ${limits.join('/')} mg/L，累计 ${fmtClock(t.exceedanceSeconds * 1000)}；峰值 ${fmt(t.peakConcentration, 2)} mg/L${limits.length > 1 ? '（限值中途调整，各段分别按当时限值判定）' : ''}。`,
       );
+    }
     if (t.gaps.some((g) => g.kind === 'SAMPLING_GAP'))
       notes.push(
         `${METRIC_LABELS[t.pollutant]} 采样空档 ${fmtClock(t.gapSeconds * 1000)}，计费负荷已扣除；缺口影响见每段说明。`,

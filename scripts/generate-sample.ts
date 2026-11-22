@@ -9,6 +9,10 @@
  *            13:00:00 校准中途生效（切开片段，两侧系数不同）
  *            01:00–01:08 冲洗（排除）、20:00–20:04 旁路（排除）
  *            02:00–02:03 三分钟缺测；迟到补录文件在申报后到达（16:40）
+ *            17:00–17:04 持续超标平台（浓度压在 58 mg/L 附近，实测连续超限，约 4 分钟）
+ *            21:00–21:08 超标后清洗（事件在清洗开始处终止，迟到处置记录随后到达）
+ *            22:00–22:11 持续超标但 22:04–22:08 采样断档（不得臆造持续超标，跨空档标 UNKNOWN）
+ *            19:00 起 COD 限值由 50 调整为 40 mg/L（标准中途调整，事件必须切开）
  *  - CC-E02：12:00 浓度探头更换；15:00–15:03 冲洗
  *  - HX-OUT：07:00–07:30 流量故障；10:00 校准
  *  - ZB-01：16:00–16:20 缺测；04:00–04:30 旁路
@@ -22,12 +26,15 @@ import { serializeCsv, isoLocal } from '../src/sample/csv';
 import type {
   Binding,
   Calibration,
+  DispositionKind,
+  DispositionRecord,
   Instrument,
   OutfallPoint,
   Plant,
   Pollutant,
   Reading,
   SampleManifest,
+  StandardRule,
   StatePeriod,
 } from '../src/domain/types';
 
@@ -101,6 +108,14 @@ const points: OutfallPoint[] = [
     reused: false,
     designFlowM3h: 520,
     note: '五分钟级上报；16:00–16:20 缺测；04:00–04:30 旁路。',
+  },
+  {
+    pointCode: 'HX-E03',
+    plantId: 'P2',
+    name: '河西厂东排口',
+    reused: false,
+    designFlowM3h: 260,
+    note: '边界闭合演示：06:10 有一小段平台超限，但边界读数恰在限值上（50.00），事件只能以“开放：边界未落到限值以下”结束。',
   },
 ];
 
@@ -340,6 +355,60 @@ const instruments: Instrument[] = [
     note: '时钟慢 6 秒。',
   },
   {
+    instrumentId: 'C-CO7',
+    pointCode: 'HX-E03',
+    plantId: 'P2',
+    kind: 'CONCENTRATION',
+    metric: 'COD',
+    model: 'UV-CodMeter 2200',
+    serial: 'B2410',
+    scale: 1.0,
+    offset: 0,
+    valueUncertainty: 0.03,
+    nominalIntervalSeconds: 60,
+    installedAt: at(0) - 120 * 24 * HOUR,
+    removedAt: null,
+    clockOffsetMs: 0,
+    clockOffsetUncertaintyMs: 400,
+    note: '边界闭合演示用；06:08 与 06:14 读数恰为限值。',
+  },
+  {
+    instrumentId: 'N-NH5',
+    pointCode: 'HX-E03',
+    plantId: 'P2',
+    kind: 'CONCENTRATION',
+    metric: 'NH3N',
+    model: 'NH3-N Analyzer 80',
+    serial: 'N5910',
+    scale: 1.0,
+    offset: 0,
+    valueUncertainty: 0.04,
+    nominalIntervalSeconds: 60,
+    installedAt: at(0) - 300 * 24 * HOUR,
+    removedAt: null,
+    clockOffsetMs: 0,
+    clockOffsetUncertaintyMs: 400,
+    note: '分钟级；边界演示点位。',
+  },
+  {
+    instrumentId: 'F-FL5',
+    pointCode: 'HX-E03',
+    plantId: 'P2',
+    kind: 'FLOW',
+    metric: 'FLOW',
+    model: 'Ultrasonic Flow U8',
+    serial: 'F8511',
+    scale: 1.0,
+    offset: 0,
+    valueUncertainty: 0.025,
+    nominalIntervalSeconds: 60,
+    installedAt: at(0) - 500 * 24 * HOUR,
+    removedAt: null,
+    clockOffsetMs: 0,
+    clockOffsetUncertaintyMs: 300,
+    note: '边界闭合演示。',
+  },
+  {
     instrumentId: 'F-FL4',
     pointCode: 'ZB-01',
     plantId: 'P3',
@@ -374,6 +443,9 @@ const bindings: Binding[] = [
   { bindingId: 'B-CO6', pointCode: 'ZB-01', instrumentId: 'C-CO6', metric: 'COD', from: instruments[11].installedAt, to: null },
   { bindingId: 'B-NH4', pointCode: 'ZB-01', instrumentId: 'N-NH4', metric: 'NH3N', from: instruments[12].installedAt, to: null },
   { bindingId: 'B-FL4', pointCode: 'ZB-01', instrumentId: 'F-FL4', metric: 'FLOW', from: instruments[13].installedAt, to: null },
+  { bindingId: 'B-CO7', pointCode: 'HX-E03', instrumentId: 'C-CO7', metric: 'COD', from: instruments[14].installedAt, to: null },
+  { bindingId: 'B-NH5', pointCode: 'HX-E03', instrumentId: 'N-NH5', metric: 'NH3N', from: instruments[15].installedAt, to: null },
+  { bindingId: 'B-FL5', pointCode: 'HX-E03', instrumentId: 'F-FL5', metric: 'FLOW', from: instruments[16].installedAt, to: null },
 ];
 
 const calibrations: Calibration[] = [
@@ -443,6 +515,15 @@ const states: StatePeriod[] = [
     workOrder: 'WO-118-001',
   },
   {
+    stateId: 'ST-CCE01-CLEAN-2100',
+    instrumentId: 'C-CO2',
+    state: 'FLUSH',
+    from: at(21),
+    to: at(21, 8),
+    reason: '超标后启动探头清洗（事件在清洗开始处终止）',
+    workOrder: 'WO-118-021',
+  },
+  {
     stateId: 'ST-CCE01-FL1-BYPASS-2000',
     instrumentId: 'F-FL1',
     state: 'BYPASS',
@@ -488,6 +569,11 @@ interface PointProfile {
   events: {
     gap?: [number, number];
     shock?: { from: number; to: number; pollutant: Pollutant };
+    plateau?: { from: number; to: number; pollutant: Pollutant; values: number[] };
+    rising?: { from: number; to: number; pollutant: Pollutant; fromValue: number; peakValue: number };
+    plateauWithGap?: { from: number; to: number; pollutant: Pollutant; gap: [number, number] };
+    limitPlateau?: { from: number; to: number; pollutant: Pollutant };
+    boundaryPlateau?: { from: number; to: number; pollutant: Pollutant; values: number[] };
   };
 }
 
@@ -512,6 +598,30 @@ const profiles: PointProfile[] = [
     events: {
       gap: [at(2), at(2, 3)],
       shock: { from: at(9, 15), to: at(9, 15, 40), pollutant: 'COD' },
+      // 17:00–17:04 平台：实测连续超限
+      plateau: { from: at(17), to: at(17, 4), pollutant: 'COD', values: [57, 59, 58.5, 58, 57.5] },
+      // 21:00 起爬升越过限值，21:08 清洗开始（事件在清洗处终止，之后迟到处置记录才到达）
+      rising: { from: at(20, 58), to: at(21), pollutant: 'COD', fromValue: 61, peakValue: 66 },
+      // 22:00–22:11 持续超限，但 22:04–22:08 采样断档
+      plateauWithGap: { from: at(22), to: at(22, 11), pollutant: 'COD', gap: [at(22, 4), at(22, 8)] },
+      // 19:00 起限值由 50 调整为 40：平台跨越限值调整点（55 mg/L 两侧都超限，事件必须切开）
+      limitPlateau: { from: at(18, 58), to: at(19, 4), pollutant: 'COD' },
+    },
+  },
+  {
+    pointCode: 'HX-E03',
+    plantId: 'P2',
+    cadenceSec: 60,
+    metrics: [
+      { metric: 'COD', instrumentIds: [{ from: at(0), instrumentId: 'C-CO7' }], base: 27, amplitude: 2.6, phaseHour: 8 },
+      { metric: 'NH3N', instrumentIds: [{ from: at(0), instrumentId: 'N-NH5' }], base: 3.4, amplitude: 0.4, phaseHour: 11 },
+      { metric: 'FLOW', instrumentIds: [{ from: at(0), instrumentId: 'F-FL5' }], base: 250, amplitude: 20, phaseHour: 10 },
+    ],
+    events: {
+      // 06:10–06:14 平台：两侧边界读数恰为限值 50.00（不超限），内部略高
+      boundaryPlateau: { from: at(6, 8), to: at(6, 14), pollutant: 'COD', values: [52, 54, 53] },
+      // 06:15–06:30 采样断档：事件终点读数为限值 50.00，之后无读数可插值 → 只能开放
+      gap: [at(6, 15), at(6, 31)],
     },
   },
   {
@@ -584,6 +694,33 @@ function trueValue(profile: MetricProfile, t: number, pointProfile: PointProfile
       else value = [9.2, 10.5, 8.6][Math.min(2, Math.floor(offsetSec / 10))];
     }
   }
+  const ev = pointProfile.events;
+  if (ev.plateau && profile.metric === ev.plateau.pollutant && t >= ev.plateau.from && t < ev.plateau.to) {
+    const frac = (t - ev.plateau.from) / (ev.plateau.to - ev.plateau.from);
+    const idx = Math.min(ev.plateau.values.length - 1, Math.floor(frac * ev.plateau.values.length));
+    value = ev.plateau.values[idx];
+  }
+  if (ev.plateauWithGap && profile.metric === ev.plateauWithGap.pollutant && t >= ev.plateauWithGap.from && t < ev.plateauWithGap.to) {
+    value = 58 + ((t - ev.plateauWithGap.from) / MIN) * 0.35;
+  }
+  if (ev.limitPlateau && profile.metric === ev.limitPlateau.pollutant && t >= ev.limitPlateau.from && t < ev.limitPlateau.to) {
+    // 55 mg/L：在 50 限值下已超限，19:00 调整为 40 后仍超限——事件必须按限值切开
+    value = 55;
+  }
+  if (ev.rising && profile.metric === ev.rising.pollutant && t >= ev.rising.from && t < ev.rising.to) {
+    const frac = (t - ev.rising.from) / (ev.rising.to - ev.rising.from);
+    value = ev.rising.fromValue + (ev.rising.peakValue - ev.rising.fromValue) * frac;
+  }
+  if (ev.boundaryPlateau && profile.metric === ev.boundaryPlateau.pollutant && t >= ev.boundaryPlateau.from && t <= ev.boundaryPlateau.to) {
+    // 两侧边界读数恰为限值 50.00（不算超限）；内部 52/54/53
+    if (t === ev.boundaryPlateau.from || t === ev.boundaryPlateau.to) value = 50;
+    else {
+      const span = (ev.boundaryPlateau.to - ev.boundaryPlateau.from) / 1000;
+      const frac = (t - ev.boundaryPlateau.from) / 1000 / span;
+      const idx = Math.min(ev.boundaryPlateau.values.length - 1, Math.floor(frac * ev.boundaryPlateau.values.length));
+      value = ev.boundaryPlateau.values[idx];
+    }
+  }
   // 旁路期间浓度计仍在取样，但状态排除；给一个可辨识值
   return Math.round(value * 1000) / 1000;
 }
@@ -628,6 +765,8 @@ function generatePoint(profile: PointProfile): Generated {
   for (let aligned = D0 + step; aligned < D0 + 24 * HOUR; aligned += step) {
     const gap = profile.events.gap;
     if (gap && aligned >= gap[0] && aligned < gap[1]) continue;
+    const gap2 = profile.events.plateauWithGap?.gap;
+    if (gap2 && aligned >= gap2[0] && aligned < gap2[1]) continue;
     for (const metricProfile of profile.metrics) {
       const instrumentId = instrumentFor(metricProfile, aligned);
       const trueVal = trueValue(metricProfile, aligned, profile);
@@ -796,6 +935,302 @@ function main(): void {
       note: c.note,
     })),
   );
+  const standards: StandardRule[] = [
+    {
+      standardId: 'STD-CC-E01-COD-2026',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      limitValue: 50,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: at(19),
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: '原限值 50 mg/L；19:00 起被地方加严标准替代。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-CC-E01-COD-2026-LOCAL',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      limitValue: 40,
+      effectiveFrom: at(19),
+      effectiveTo: null,
+      basis: '澄川市地方加严排放限值（2026 修订）',
+      grade: '地方加严',
+      issuedBy: '澄川市生态环境局',
+      note: '19:00 起 COD 限值由 50 下调至 40 mg/L；调整处事件必须切开。',
+      createdAt: at(0) + 18 * HOUR,
+    },
+    {
+      standardId: 'STD-CC-E01-NH3N-2026',
+      pointCode: 'CC-E01',
+      pollutant: 'NH3N',
+      limitValue: 5,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: '氨氮限值 5 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-CC-E02-COD-2026',
+      pointCode: 'CC-E02',
+      pollutant: 'COD',
+      limitValue: 50,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: 'COD 限值 50 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-CC-E02-NH3N-2026',
+      pointCode: 'CC-E02',
+      pollutant: 'NH3N',
+      limitValue: 5,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: '氨氮限值 5 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-HX-OUT-COD-2026',
+      pointCode: 'HX-OUT',
+      pollutant: 'COD',
+      limitValue: 50,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: 'COD 限值 50 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-HX-OUT-NH3N-2026',
+      pointCode: 'HX-OUT',
+      pollutant: 'NH3N',
+      limitValue: 5,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: '氨氮限值 5 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-ZB-01-COD-2026',
+      pointCode: 'ZB-01',
+      pollutant: 'COD',
+      limitValue: 60,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级B',
+      issuedBy: '生态环境主管部门',
+      note: '北滩厂执行一级B，COD 60 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-ZB-01-NH3N-2026',
+      pointCode: 'ZB-01',
+      pollutant: 'NH3N',
+      limitValue: 8,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级B',
+      issuedBy: '生态环境主管部门',
+      note: '氨氮限值 8 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-HX-E03-COD-2026',
+      pointCode: 'HX-E03',
+      pollutant: 'COD',
+      limitValue: 50,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: 'COD 限值 50 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+    {
+      standardId: 'STD-HX-E03-NH3N-2026',
+      pointCode: 'HX-E03',
+      pollutant: 'NH3N',
+      limitValue: 5,
+      effectiveFrom: at(0) - 300 * 24 * HOUR,
+      effectiveTo: null,
+      basis: '《城镇污水处理厂污染物排放标准》GB 18918-2002',
+      grade: '一级A',
+      issuedBy: '生态环境主管部门',
+      note: '氨氮限值 5 mg/L。',
+      createdAt: at(0) - 300 * 24 * HOUR,
+    },
+  ];
+
+  // 处置记录：正常到达（接收时刻早于申报截止 07:20 次日）
+  const dispositions: DispositionRecord[] = [
+    {
+      dispositionId: 'DSP-CCE01-DOSE-0820',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      kind: 'DOSING' as DispositionKind,
+      from: at(8, 20),
+      to: at(8, 35),
+      receivedAt: BASE_RECEIVED - 2 * HOUR,
+      recordedBy: '运行班',
+      summary: '冲击前例行投加絮凝剂',
+      workOrder: 'WO-118-007',
+      sourceFileId: 'pending:dispositions.csv',
+      note: '与 09:15 冲击时间上不重叠；只登记，不宣称相关。',
+    },
+    {
+      dispositionId: 'DSP-CCE01-MAINT-1250',
+      pointCode: 'CC-E01',
+      pollutant: 'ANY',
+      kind: 'MAINTENANCE' as DispositionKind,
+      from: at(12, 50),
+      to: at(12, 55),
+      receivedAt: BASE_RECEIVED - 30 * MIN,
+      recordedBy: '仪表班',
+      summary: '校准前管路检查',
+      workOrder: 'WO-118-011',
+      sourceFileId: 'pending:dispositions.csv',
+      note: '紧邻 13:00 校准，属维护记录；不得据此判定任何事件消失。',
+    },
+    {
+      dispositionId: 'DSP-CCE01-DOSE-1700',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      kind: 'DOSING' as DispositionKind,
+      from: at(17),
+      to: at(17, 4),
+      receivedAt: BASE_RECEIVED - 10 * MIN,
+      recordedBy: '运行班',
+      summary: '17:00 平台期投加碳源',
+      workOrder: 'WO-118-019',
+      sourceFileId: 'pending:dispositions.csv',
+      note: '与 17:00–17:04 平台超限时段重叠：同现不等于因果，记录不改变事件起止。',
+    },
+    {
+      dispositionId: 'DSP-CCE01-MAINT-2230',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      kind: 'MAINTENANCE' as DispositionKind,
+      from: at(22, 30),
+      to: at(22, 40),
+      receivedAt: BASE_RECEIVED - 5 * MIN,
+      recordedBy: '仪表班',
+      summary: '采样泵检查',
+      workOrder: 'WO-118-023',
+      sourceFileId: 'pending:dispositions.csv',
+      note: '落在 22:00–22:11 事件的采样断档内；只登记。',
+    },
+  ];
+
+  // 迟到处置记录（申报后到达）：只能补证，不能宣布超标已消失
+  const lateDispositions: DispositionRecord[] = [
+    {
+      dispositionId: 'DSP-CCE01-CLEAN-2100-LATE',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      kind: 'CLEANING' as DispositionKind,
+      from: at(21),
+      to: at(21, 8),
+      receivedAt: LATE_RECEIVED,
+      recordedBy: '仪表班',
+      summary: '21:00 超标后探头清洗（事后补录）',
+      workOrder: 'WO-118-021',
+      sourceFileId: 'pending:late_dispositions_CC-E01_2026-11-19.csv',
+      note: '迟到记录：事件在清洗开始处已终止；该记录只补充解释，不能宣布 21:00 前的超标已消失。',
+    },
+    {
+      dispositionId: 'DSP-CCE01-DOSE-2200-LATE',
+      pointCode: 'CC-E01',
+      pollutant: 'COD',
+      kind: 'DOSING' as DispositionKind,
+      from: at(22, 0),
+      to: at(22, 11),
+      receivedAt: LATE_RECEIVED,
+      recordedBy: '运行班',
+      summary: '22:00 事件期间投加药剂（事后补录）',
+      workOrder: 'WO-118-024',
+      sourceFileId: 'pending:late_dispositions_CC-E01_2026-11-19.csv',
+      note: '与事件时段重叠；同现不等于因果，不能据此删除事件或判定“超标已消失”。',
+    },
+  ];
+
+  const standardCsv = serializeCsv(
+    [
+      'standard_id',
+      'point_code',
+      'pollutant',
+      'limit_value',
+      'effective_from',
+      'effective_to',
+      'basis',
+      'grade',
+      'issued_by',
+      'created_at',
+      'note',
+    ],
+    standards.map((r) => ({
+      standard_id: r.standardId,
+      point_code: r.pointCode,
+      pollutant: r.pollutant,
+      limit_value: r.limitValue,
+      effective_from: isoLocal(r.effectiveFrom),
+      effective_to: r.effectiveTo === null ? '' : isoLocal(r.effectiveTo),
+      basis: r.basis,
+      grade: r.grade,
+      issued_by: r.issuedBy,
+      created_at: isoLocal(r.createdAt),
+      note: r.note,
+    })),
+  );
+  const dispositionHeaders = [
+    'disposition_id',
+    'point_code',
+    'pollutant',
+    'kind',
+    'from',
+    'to',
+    'received_at',
+    'recorded_by',
+    'summary',
+    'work_order',
+    'note',
+  ];
+  const dispositionRows = (list: DispositionRecord[]) =>
+    list.map((d) => ({
+      disposition_id: d.dispositionId,
+      point_code: d.pointCode,
+      pollutant: d.pollutant,
+      kind: d.kind,
+      from: isoLocal(d.from),
+      to: isoLocal(d.to),
+      received_at: isoLocal(d.receivedAt),
+      recorded_by: d.recordedBy,
+      summary: d.summary,
+      work_order: d.workOrder,
+      note: d.note,
+    }));
+  const dispositionCsv = serializeCsv(dispositionHeaders, dispositionRows(dispositions));
+  const lateDispositionCsv = serializeCsv(dispositionHeaders, dispositionRows(lateDispositions));
+
   const stateCsv = serializeCsv(
     ['state_id', 'instrument_id', 'state', 'from', 'to', 'reason', 'work_order'],
     states.map((s) => ({
@@ -816,6 +1251,8 @@ function main(): void {
     { name: 'bindings.csv', text: bindingCsv, kind: 'BINDING_REGISTER', note: '仪表—点位—指标绑定有效期' },
     { name: 'calibrations.csv', text: calibrationCsv, kind: 'CALIBRATION_REGISTER', note: '校准系数与生效时刻' },
     { name: 'states.csv', text: stateCsv, kind: 'STATE_LOG', note: '冲洗/校准/旁路/故障状态台账' },
+    { name: 'standards.csv', text: standardCsv, kind: 'STANDARD_REGISTER', note: '标准适用库（排口×因子×时段×限值生效日期；CC-E01 COD 19:00 调整）' },
+    { name: 'dispositions.csv', text: dispositionCsv, kind: 'DISPOSITION_REGISTER', note: '处置关联簿基础记录（加药/维护），接收时刻早于申报截止' },
   ];
   for (const reg of registers) {
     writeFileSync(resolve(outDir, reg.name), reg.text, 'utf8');
@@ -893,11 +1330,13 @@ function main(): void {
     })),
   );
   writeFileSync(resolve(outDir, lateFileName), lateText, 'utf8');
+  const lateDispositionFileName = 'late_dispositions_CC-E01_2026-11-19.csv';
+  writeFileSync(resolve(outDir, lateDispositionFileName), lateDispositionCsv, 'utf8');
 
   const manifest: SampleManifest = {
     name: '排口负荷离线复核样例（虚构）',
     description:
-      '2026-11-18 澄川水务三个厂站、四个排口的接入资料。CC-E01 含 40 秒高浓度冲击、13:00 校准中途生效、02:00–02:03 三分钟缺测、04:00 探头更换与 20:00 旁路；迟到补录在申报后到达。',
+      '2026-11-18 澄川水务三个厂站、五个排口的接入资料。CC-E01 含 40 秒冲击、17:00/22:00 持续超标、21:00 清洗终止、02:00–02:03 与 22:04–22:08 采样断档、13:00 校准中途生效、19:00 限值由 50 下调至 40；标准适用库与处置关联簿随基础资料装载，迟到读数与迟到处置在申报后到达。HX-E03 为边界闭合演示点位。',
     generatedAt: new Date(Date.UTC(2026, 10, 20, 1, 0, 0)).toISOString(),
     timezone: 'Asia/Shanghai',
     baseFiles: manifestBase,
@@ -908,6 +1347,14 @@ function main(): void {
       rowCount: lateReadings.length,
       sha256: sha256(lateText),
       note: '迟到补录：CC-E01 02:00–02:03 缺测段的 10 秒读数，申报出具后才到达。',
+    },
+    lateDispositionFile: {
+      fileName: lateDispositionFileName,
+      kind: 'LATE_BATCH',
+      receivedAt: isoLocal(LATE_RECEIVED),
+      rowCount: lateDispositions.length,
+      sha256: sha256(lateDispositionCsv),
+      note: '迟到处置记录：21:00 清洗与 22:00 投药，申报后补录；只能补证，不能宣布超标已消失。',
     },
     focus: {
       pointCode: 'CC-E01',
@@ -920,6 +1367,10 @@ function main(): void {
         '设备交接：04:00 COD 探头整机更换，点位编号复用按实例衔接',
         '排除时段：01:00–01:08 冲洗、20:00–20:04 旁路，均不并入排放',
         '迟到补录：16:40 到达的 02:00–02:03 读数，只能形成锁定来源范围的重算候选',
+        '持续超标平台：17:00–17:04 实测连续超限；22:00–22:11 超限但 22:04–22:08 采样断档，不得臆造持续超标',
+        '清洗终止：21:00 起浓度爬升超限，21:08 清洗开始即终止插值链；迟到清洗记录只补证',
+        '限值中途调整：19:00 起 COD 限值由 50 下调至 40，跨越调整点的平台事件必须切开',
+        '边界开放：HX-E03 06:08–06:14 平台两侧边界读数恰为限值 50.00，事件只能判为“开放：边界未落到限值以下”',
       ],
     },
   };
@@ -927,7 +1378,7 @@ function main(): void {
 
   const totalRows = manifestBase.filter((f) => f.kind === 'READINGS').reduce((a, f) => a + f.rowCount, 0);
   console.log(`样例已生成：${outDir}`);
-  console.log(`读数 ${totalRows} 行；迟到补录 ${lateReadings.length} 行；台账 ${registers.length} 份`);
+  console.log(`读数 ${totalRows} 行；迟到补录 ${lateReadings.length} 行；台账 ${registers.length} 份；标准 ${standards.length} 条；处置 ${dispositions.length} 条，迟到处置 ${lateDispositions.length} 条`);
 }
 
 main();

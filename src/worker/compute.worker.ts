@@ -6,9 +6,12 @@
 
 import {
   DEFAULT_SCOPE,
+  DailyReportDraft,
   Dataset,
+  DayEventSummary,
   DayLoadSnapshot,
   Declaration,
+  DerivationStrategy,
   IntegrationMethod,
   MonthLoad,
   RecalcCandidate,
@@ -16,13 +19,27 @@ import {
 } from '../domain/types';
 import { compareRoutes, computeDayLoad, computeMonthLoad } from '../domain/engine';
 import { buildDeclaration, buildRecalcCandidate, detectLateReadings } from '../domain/service';
+import { deriveDayEvents, computeSignatureLight } from '../domain/events';
+import { checkReportDraft } from '../domain/dailyReport';
+
+export interface EventDeriveResult {
+  summary: DayEventSummary;
+  currentSignature: string;
+  strategies: { strategy: DerivationStrategy; eventCount: number; ms: number }[];
+  equivalent: boolean;
+  mismatches: string[];
+}
 
 export type WorkerRequest =
   | { id: string; type: 'computeDay'; dataset: Dataset; pointCode: string; day: string; method: IntegrationMethod; scope?: Partial<ScopeOptions>; withChart?: boolean }
   | { id: string; type: 'compareRoutes'; dataset: Dataset; pointCode: string; day: string; scope?: Partial<ScopeOptions> }
   | { id: string; type: 'computeMonth'; dataset: Dataset; pointCode: string; month: string; method: IntegrationMethod; scope?: Partial<ScopeOptions> }
   | { id: string; type: 'buildDeclaration'; dataset: Dataset; pointCode: string; day: string; method: IntegrationMethod; createdBy: string; scope?: Partial<ScopeOptions>; cutoffReceivedAt?: number }
-  | { id: string; type: 'buildRecalc'; dataset: Dataset; declaration: Declaration; createdBy: string; scope?: Partial<ScopeOptions>; autoDetected?: boolean };
+  | { id: string; type: 'buildRecalc'; dataset: Dataset; declaration: Declaration; createdBy: string; scope?: Partial<ScopeOptions>; autoDetected?: boolean }
+  | { id: string; type: 'deriveEvents'; dataset: Dataset; pointCode: string; day: string; strategy: DerivationStrategy; scope?: Partial<ScopeOptions> }
+  | { id: string; type: 'proveStrategies'; dataset: Dataset; pointCode: string; day: string; scope?: Partial<ScopeOptions> }
+  | { id: string; type: 'checkDraft'; dataset: Dataset; draft: DailyReportDraft; cacheStale: boolean }
+  | { id: string; type: 'signature'; dataset: Dataset; pointCode: string; day: string };
 
 export interface WorkerResponseOk {
   id: string;
@@ -33,7 +50,10 @@ export interface WorkerResponseOk {
     | ReturnType<typeof compareRoutes>
     | MonthLoad
     | Declaration
-    | RecalcCandidate;
+    | RecalcCandidate
+    | EventDeriveResult
+    | ReturnType<typeof checkReportDraft>
+    | ReturnType<typeof computeSignatureLight>;
   tookMs: number;
 }
 
@@ -101,6 +121,64 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
           scope: req.scope,
           autoDetected: req.autoDetected,
         });
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'deriveEvents': {
+        const summary = deriveDayEvents(req.dataset, req.pointCode, req.day, {
+          strategy: req.strategy,
+          scope: req.scope,
+        });
+        const payload: EventDeriveResult = {
+          summary,
+          currentSignature: summary.inputSignature.signature,
+          strategies: [{ strategy: req.strategy, eventCount: summary.events.length, ms: summary.computeMs }],
+          equivalent: true,
+          mismatches: [],
+        };
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'proveStrategies': {
+        const items = (['PERSIST_SNAPSHOT', 'DERIVE_ON_DEMAND'] as DerivationStrategy[]).map((strategy) => {
+          const s = deriveDayEvents(req.dataset, req.pointCode, req.day, { strategy, scope: req.scope });
+          return { strategy, summary: s, ms: s.computeMs };
+        });
+        const [a, b] = items;
+        const payload: EventDeriveResult = {
+          summary: b.summary,
+          currentSignature: b.summary.inputSignature.signature,
+          strategies: items.map((i) => ({ strategy: i.strategy, eventCount: i.summary.events.length, ms: i.ms })),
+          equivalent:
+            a.summary.events.length === b.summary.events.length &&
+            a.summary.events.every((e, idx) => {
+              const other = b.summary.events[idx];
+              return (
+                e.eventId === other.eventId &&
+                e.startAt === other.startAt &&
+                e.endAt === other.endAt &&
+                Math.abs(e.measuredSeconds - other.measuredSeconds) < 1e-6 &&
+                Math.abs(e.interpolatedSeconds - other.interpolatedSeconds) < 1e-6 &&
+                Math.abs(e.unknownSeconds - other.unknownSeconds) < 1e-6 &&
+                Math.abs(e.limit - other.limit) < 1e-9 &&
+                e.status === other.status
+              );
+            }),
+          mismatches: [],
+        };
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'checkDraft': {
+        const summary = deriveDayEvents(req.dataset, req.draft.pointCode, req.draft.day, {
+          strategy: 'DERIVE_ON_DEMAND',
+        });
+        const payload = checkReportDraft(req.draft, summary, { cacheStale: req.cacheStale, allowDerive: true });
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'signature': {
+        const payload = computeSignatureLight(req.dataset, req.pointCode, req.day);
         post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
         break;
       }

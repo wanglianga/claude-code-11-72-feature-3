@@ -145,6 +145,9 @@ export function OverviewPage({ state, actions, onNavigate }: Props) {
                 {plant?.shortName} · {point?.name}（{pointCode}）· {day} · {METHOD_LABEL[snapshot.method]}
               </span>
               <div className="spacer" />
+              <button className="btn small" onClick={() => onNavigate('events')}>
+                查看事件时间线 →
+              </button>
               <button className="btn small" onClick={() => onNavigate('trace')}>
                 查看片段追溯 →
               </button>
@@ -158,8 +161,11 @@ export function OverviewPage({ state, actions, onNavigate }: Props) {
                   <span style={{ color: 'var(--danger)' }}>■</span> 超过排放限值。点击曲线可选择相邻片段。
                 </div>
                 <div className="tiny muted">
-                  时钟校正：{snapshot.clockNotes.length} 台仪表参与对齐
-                </div>
+                时钟校正：{snapshot.clockNotes.length} 台仪表参与对齐
+                {snapshot.pollutants.some((t) => (t.standardWindows?.length ?? 0) > 1) && (
+                  <span className="badge warn" style={{ marginLeft: 8 }}>限值中途调整</span>
+                )}
+              </div>
               </div>
             </div>
           </div>

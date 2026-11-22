@@ -4,7 +4,7 @@
  */
 
 import { sha256Hex } from './csv';
-import { datasetCounts, mergeDataset, parseBindings, parseCalibrations, parseInstruments, parsePlants, parsePoints, parseReadings, parseStates } from './ingest';
+import { datasetCounts, mergeDataset, parseBindings, parseCalibrations, parseDispositions, parseInstruments, parsePlants, parsePoints, parseReadings, parseStandards, parseStates } from './ingest';
 import type { Dataset, SampleManifest } from '../domain/types';
 import { markSampleImported, putBatch } from '../db/db';
 
@@ -58,6 +58,8 @@ export async function loadSampleBase(
     bindings: [],
     readings: [],
     files: [],
+    standards: [],
+    dispositions: [],
   };
 
   const texts = new Map<string, { text: string; size: number; sha: string }>();
@@ -113,6 +115,12 @@ export async function loadSampleBase(
     } else if (meta.kind === 'STATE_LOG') {
       const parsed = parseStates(entry.text);
       dataset = mergeDataset(dataset, { states: parsed.states, files: [{ ...baseFile, rejectedRows: parsed.errors.length, rejectedReasons: parsed.errors }] });
+    } else if (meta.kind === 'STANDARD_REGISTER') {
+      const parsed = parseStandards(entry.text, fileId);
+      dataset = mergeDataset(dataset, { standards: parsed.standards, files: [{ ...baseFile, rejectedRows: parsed.errors.length, rejectedReasons: parsed.errors }] });
+    } else if (meta.kind === 'DISPOSITION_REGISTER') {
+      const parsed = parseDispositions(entry.text, fileId);
+      dataset = mergeDataset(dataset, { dispositions: parsed.dispositions, files: [{ ...baseFile, rejectedRows: parsed.errors.length, rejectedReasons: parsed.errors }] });
     }
   }
 
@@ -158,6 +166,8 @@ export async function loadSampleBase(
     calibrations: dataset.calibrations,
     states: dataset.states,
     bindings: dataset.bindings,
+    standards: dataset.standards,
+    dispositions: dataset.dispositions,
   });
   const { putReadingsInChunks } = await import('../db/db');
   await putReadingsInChunks(dataset.readings);
@@ -172,6 +182,7 @@ export interface LateImportResult {
   readingsAdded: number;
   filesAdded: string[];
   fingerprint: { expected: string; actual: string; ok: boolean };
+  dispositionsAdded: number;
 }
 
 /** 导入迟到补录文件（申报后到达） */
@@ -205,14 +216,43 @@ export async function importLateBatch(base: Dataset, manifest: SampleManifest, i
     ingestedBy,
     sample: true,
   };
-  const dataset = mergeDataset(base, { readings: parsed.readings, files: [file] });
+  let dataset = mergeDataset(base, { readings: parsed.readings, files: [file] });
   await putBatch({ files: [file] });
   const { putReadingsInChunks } = await import('../db/db');
   await putReadingsInChunks(parsed.readings);
+  // 迟到处置记录（若清单提供）：只能补证，不能宣布超标已消失
+  let dispositionsAdded = 0;
+  const ldMeta = manifest.lateDispositionFile;
+  if (ldMeta) {
+    const entry2 = await fetchText(ldMeta.fileName);
+    const sha2 = await sha256Hex(entry2.text);
+    const ldFileId = `file:${ldMeta.fileName}:${sha2.slice(0, 16)}`;
+    const parsedDisp = parseDispositions(entry2.text, ldFileId);
+    const ldFile = {
+      fileId: ldFileId,
+      fileName: ldMeta.fileName,
+      sha256: sha2,
+      sizeBytes: entry2.size,
+      kind: ldMeta.kind,
+      receivedAt: Date.parse(ldMeta.receivedAt),
+      rowCount: ldMeta.rowCount,
+      acceptedRows: parsedDisp.dispositions.length,
+      rejectedRows: parsedDisp.errors.length,
+      rejectedReasons: parsedDisp.errors.slice(0, 20),
+      note: ldMeta.note,
+      ingestedAt: Date.now(),
+      ingestedBy,
+      sample: true,
+    };
+    dataset = mergeDataset(dataset, { dispositions: parsedDisp.dispositions, files: [ldFile] });
+    await putBatch({ files: [ldFile], dispositions: parsedDisp.dispositions });
+    dispositionsAdded = parsedDisp.dispositions.length;
+  }
   return {
     dataset,
     readingsAdded: parsed.readings.length,
     filesAdded: [fileId],
     fingerprint: { expected: meta.sha256, actual: sha, ok },
+    dispositionsAdded,
   };
 }

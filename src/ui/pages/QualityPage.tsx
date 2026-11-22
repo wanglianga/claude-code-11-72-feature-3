@@ -126,6 +126,9 @@ export function QualityPage({ state, actions, onNavigate }: Props) {
               <button className="btn" onClick={() => onNavigate('recalc')}>
                 前往复算候选
               </button>
+              <button className="btn" onClick={() => onNavigate('report')}>
+                前往申报核对
+              </button>
               <button
                 className="btn primary"
                 disabled={!canFile || busy || Boolean(currentDeclaration)}

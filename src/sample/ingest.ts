@@ -10,13 +10,17 @@ import {
   Binding,
   Calibration,
   Dataset,
+  DispositionKind,
+  DispositionRecord,
   FileKind,
   Instrument,
   IntakeFile,
   OutfallPoint,
   Plant,
+  Pollutant,
   Reading,
   ScopeOptions,
+  StandardRule,
   StatePeriod,
 } from '../domain/types';
 import { parseCsv, parseIso, parseIsoOrNull } from './csv';
@@ -190,6 +194,70 @@ export interface ParsedReadings {
   rejected: number;
 }
 
+/** 标准适用库：排口 × 因子 × 时段 × 限值生效日期 */
+export function parseStandards(text: string, fileId: string): { standards: StandardRule[]; errors: string[] } {
+  const { rows } = parseCsv(text);
+  const errors: string[] = [];
+  const standards: StandardRule[] = rows.map((row, i) => {
+    let effectiveFrom = 0;
+    let effectiveTo: number | null = null;
+    try {
+      effectiveFrom = parseIso(row.effective_from);
+      effectiveTo = parseIsoOrNull(row.effective_to);
+    } catch (e) {
+      errors.push(`第 ${i + 2} 行限值有效期无法解析：${(e as Error).message}`);
+    }
+    const created = row.created_at ? parseIso(row.created_at) : effectiveFrom;
+    return {
+      standardId: row.standard_id,
+      pointCode: row.point_code,
+      pollutant: (row.pollutant as Pollutant) ?? 'COD',
+      limitValue: num(row.limit_value, 'limit_value', errors, i + 2),
+      effectiveFrom,
+      effectiveTo,
+      basis: row.basis ?? '',
+      grade: row.grade ?? '',
+      issuedBy: row.issued_by ?? '',
+      note: row.note ?? '',
+      createdAt: created,
+      sourceFileId: fileId,
+    };
+  });
+  return { standards, errors };
+}
+
+/** 处置关联簿：加药、旁路、维护、清洗记录（收到即登记，迟到标记由接收时刻判断） */
+export function parseDispositions(text: string, fileId: string): { dispositions: DispositionRecord[]; errors: string[] } {
+  const { rows } = parseCsv(text);
+  const errors: string[] = [];
+  const dispositions: DispositionRecord[] = rows.map((row, i) => {
+    let from = 0;
+    let to = 0;
+    let receivedAt = 0;
+    try {
+      from = parseIso(row.from);
+      to = parseIso(row.to);
+      receivedAt = row.received_at ? parseIso(row.received_at) : from;
+    } catch (e) {
+      errors.push(`第 ${i + 2} 行处置时间无法解析：${(e as Error).message}`);
+    }
+    return {
+      dispositionId: row.disposition_id,
+      pointCode: row.point_code,
+      pollutant: (row.pollutant as DispositionRecord['pollutant']) ?? 'ANY',
+      kind: (row.kind as DispositionKind) ?? 'OTHER',
+      from,
+      to,
+      receivedAt,
+      recordedBy: row.recorded_by ?? '',
+      summary: row.summary ?? '',
+      workOrder: row.work_order ?? '',
+      sourceFileId: fileId,
+      note: row.note ?? '',
+    };
+  });
+  return { dispositions, errors };
+}
 /** 读数解析：依赖已入库的仪表台账（时钟校正、归属）与绑定（点位/厂站） */
 export function parseReadings(
   text: string,
@@ -277,6 +345,8 @@ export function emptyDataset(): Dataset {
     bindings: [],
     readings: [],
     files: [],
+    standards: [],
+    dispositions: [],
   };
 }
 
@@ -292,6 +362,8 @@ export function mergeDataset(base: Dataset, patch: Partial<Dataset>, options: { 
     bindings: mergeBy(base.bindings, patch.bindings ?? [], (b) => b.bindingId),
     readings,
     files: mergeBy(base.files, patch.files ?? [], (f) => f.fileId),
+    standards: mergeBy(base.standards, patch.standards ?? [], (s) => s.standardId),
+    dispositions: mergeBy(base.dispositions, patch.dispositions ?? [], (d) => d.dispositionId),
   };
 }
 

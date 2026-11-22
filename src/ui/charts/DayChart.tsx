@@ -32,6 +32,9 @@ export function DayChart({ snapshot, selectedSegmentId, onSelectSegment }: Props
     const rateKey = pollutant === 'COD' ? 'codRateKgH' : 'nh3nRateKgH';
     const trace = snapshot.pollutants.find((p) => p.pollutant === pollutant);
     const standard = trace?.standard ?? 50;
+    const windows = trace?.standardWindows && trace.standardWindows.length > 0
+      ? trace.standardWindows
+      : [{ limit: standard, from: snapshot.windowFrom, to: snapshot.windowTo, standardId: 'default', conflictIds: [], basis: '', grade: '', pollutant }];
     const concs = chart.map((c) => c[concKey]).filter((v): v is number => v !== null);
     const rates = chart.map((c) => c[rateKey]).filter((v): v is number => v !== null);
     const concMax = Math.max(standard * 1.25, ...concs) || 60;
@@ -87,6 +90,7 @@ export function DayChart({ snapshot, selectedSegmentId, onSelectSegment }: Props
       concMax,
       rateMax,
       standard,
+      windows: windows.map((w) => ({ limit: w.limit, from: w.from, to: w.to, standardId: w.standardId })),
       concPath: concPath.join(' '),
       ratePath: ratePath.join(' '),
       bands,
@@ -135,6 +139,9 @@ export function DayChart({ snapshot, selectedSegmentId, onSelectSegment }: Props
             <button className={`btn small ${pollutant === 'NH3N' ? 'primary' : ''}`} onClick={() => setPollutant('NH3N')}>
               氨氮
             </button>
+            {view.windows.length > 1 && (
+              <span className="badge warn">限值中途调整 · {view.windows.length} 段</span>
+            )}
           </div>
         </div>
         <svg
@@ -206,20 +213,43 @@ export function DayChart({ snapshot, selectedSegmentId, onSelectSegment }: Props
               </text>
             </g>
           ))}
-          {/* 阈值线 */}
-          <line
-            x1={PAD.left}
-            x2={W - PAD.right}
-            y1={view.yC(view.standard)}
-            y2={view.yC(view.standard)}
-            stroke="var(--danger)"
-            strokeWidth="1"
-            strokeDasharray="6 4"
-            opacity="0.7"
-          />
-          <text x={W - PAD.right - 4} y={view.yC(view.standard) - 5} textAnchor="end" fontSize="10" fill="var(--danger)">
-            限值 {view.standard} mg/L
-          </text>
+          {/* 阈值线：按标准窗口分段，限值中途调整处必须断开 */}
+          {view.windows.map((w, i) => (
+            <g key={`limit-${w.standardId}-${i}`}>
+              <line
+                x1={view.x(Math.max(w.from, snapshot.windowFrom))}
+                x2={view.x(Math.min(w.to, snapshot.windowTo))}
+                y1={view.yC(w.limit)}
+                y2={view.yC(w.limit)}
+                stroke="var(--danger)"
+                strokeWidth="1"
+                strokeDasharray="6 4"
+                opacity="0.75"
+              />
+              <text
+                x={view.x(Math.min(w.to, snapshot.windowTo)) - 4}
+                y={view.yC(w.limit) - 5}
+                textAnchor="end"
+                fontSize="10"
+                fill="var(--danger)"
+              >
+                限值 {w.limit} mg/L
+              </text>
+            </g>
+          ))}
+          {view.windows.slice(0, -1).map((w) => (
+            <line
+              key={`limit-cut-${w.standardId}`}
+              x1={view.x(w.to)}
+              x2={view.x(w.to)}
+              y1={PAD.top}
+              y2={H - PAD.bottom}
+              stroke="var(--info)"
+              strokeWidth="1.5"
+              strokeDasharray="3 3"
+              opacity="0.8"
+            />
+          ))}
           {view.exceedances.map((e, i) => (
             <rect
               key={`ex-${i}`}
